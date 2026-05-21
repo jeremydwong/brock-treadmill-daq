@@ -1,0 +1,14 @@
+[project]
+name = "loopback-test"
+version = "0.1.0"
+description = "USB-1608GX-2AO loopback tests"
+requires-python = ">=3.10"
+dependencies = [
+    "uldaq",
+    "matplotlib",
+    "numpy",
+]
+
+[project.scripts]
+loopback = "loopback_test:main"
+sinusoid = "sinusoid_loopback:main"

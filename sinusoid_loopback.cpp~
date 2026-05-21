@@ -1,0 +1,306 @@
+/**
+ * Antiphase sinusoid loopback test using the hardware scan API (C++).
+ *
+ * Both AO channels are updated simultaneously by the hardware pacer.
+ * AI channels are also hardware-scanned for consistent sample timing.
+ * Generates a PNG plot via gnuplot and optionally displays it.
+ *
+ * Wiring:
+ *   AOUT0 (Pin 13) -> CH0 (Pin 1)
+ *   AOUT1 (Pin 15) -> CH1 (Pin 4)
+ *   AGND  (Pin 14) -> AGND (Pin 3)
+ *
+ * Dependencies:
+ *   sudo apt install gnuplot libuldaq-dev
+ *
+ * Build:
+ *   g++ -std=c++17 -O2 -o sinusoid_loopback sinusoid_loopback.cpp -luldaq -lm
+ *
+ * Run:
+ *   ./sinusoid_loopback
+ */
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#include "uldaq.h"
+
+// --- Configuration ---
+constexpr int    AO_LOW_CH  = 0;
+constexpr int    AO_HIGH_CH = 1;
+constexpr int    AI_LOW_CH  = 0;
+constexpr int    AI_HIGH_CH = 1;
+constexpr int    AO_NUM_CH  = AO_HIGH_CH - AO_LOW_CH + 1;
+constexpr int    AI_NUM_CH  = AI_HIGH_CH - AI_LOW_CH + 1;
+
+constexpr double AMPLITUDE   = 5.0;
+constexpr double OFFSET      = 0.0;
+constexpr double FREQUENCY   = 10.0;
+constexpr int    NUM_CYCLES  = 40;
+constexpr double SAMPLE_RATE = 10000.0;
+constexpr int    SAMPLES_PER_CHANNEL =
+    static_cast<int>(NUM_CYCLES * SAMPLE_RATE / FREQUENCY);
+
+constexpr int MAX_DEV_COUNT = 16;
+
+static const char* CSV_PATH = "sinusoid_loopback.csv";
+static const char* PNG_PATH = "sinusoid_loopback.png";
+
+
+static void check(UlError err, const char* context) {
+    if (err != ERR_NO_ERROR) {
+        std::fprintf(stderr, "ERROR [%s]: uldaq error code %d\n", context, err);
+        std::exit(1);
+    }
+}
+
+
+static void write_csv(const char* path,
+                      const std::vector<double>& ao_ch0,
+                      const std::vector<double>& ao_ch1,
+                      const std::vector<double>& ai_ch0,
+                      const std::vector<double>& ai_ch1,
+                      double rate) {
+    std::ofstream csv(path);
+    if (!csv.is_open()) {
+        std::fprintf(stderr, "ERROR: Could not open %s\n", path);
+        return;
+    }
+    csv << "time_ms,ao_ch0,ao_ch1,ai_ch0,ai_ch1,err_ch0_mv,err_ch1_mv\n";
+    for (int i = 0; i < SAMPLES_PER_CHANNEL; i++) {
+        double t_ms = (i / rate) * 1000.0;
+        double e0 = (ai_ch0[i] - ao_ch0[i]) * 1000.0;
+        double e1 = (ai_ch1[i] - ao_ch1[i]) * 1000.0;
+        csv << t_ms << ","
+            << ao_ch0[i] << "," << ao_ch1[i] << ","
+            << ai_ch0[i] << "," << ai_ch1[i] << ","
+            << e0 << "," << e1 << "\n";
+    }
+    csv.close();
+    std::printf("Data saved to %s\n", path);
+}
+
+
+static void plot_results(const char* csv_path, const char* png_path,
+                         double ao_rate, double ai_rate) {
+    FILE* gp = popen("gnuplot", "w");
+    if (!gp) {
+        std::fprintf(stderr, "WARNING: gnuplot not found, skipping plot.\n");
+        std::fprintf(stderr, "         Install with: sudo apt install gnuplot\n");
+        return;
+    }
+
+    // --- Generate PNG ---
+    std::fprintf(gp,
+        "set terminal pngcairo size 1400,900 enhanced font 'Helvetica,11'\n"
+        "set output '%s'\n"
+        "set datafile separator ','\n"
+        "set grid lc rgb '#e0e0e0'\n"
+        "set key right top\n"
+        "\n"
+        "set multiplot layout 3,1 title "
+        "'Antiphase Sinusoid Loopback — Hardware Scan API "
+        "(%.0f S/s/ch, %.0f Hz)' font 'Helvetica,14'\n"
+        "\n"
+        "# --- Top: Commanded ---\n"
+        "set ylabel 'Commanded (V)'\n"
+        "set format x ''\n"
+        "plot '%s' skip 1 using 1:2 with lines lw 1.2 lc rgb '#3366cc' "
+        "title 'AOUT0 (0°)', \\\n"
+        "     ''   skip 1 using 1:3 with lines lw 1.2 lc rgb '#cc3333' "
+        "title 'AOUT1 (180°)'\n"
+        "\n"
+        "# --- Middle: Measured ---\n"
+        "set ylabel 'Measured (V)'\n"
+        "plot '%s' skip 1 using 1:4 with lines lw 0.8 lc rgb '#3366cc' "
+        "title 'CH0 readback', \\\n"
+        "     ''   skip 1 using 1:5 with lines lw 0.8 lc rgb '#cc3333' "
+        "title 'CH1 readback'\n"
+        "\n"
+        "# --- Bottom: Error ---\n"
+        "set ylabel 'Error (mV)'\n"
+        "set xlabel 'Time (ms)'\n"
+        "set format x '%%g'\n"
+        "plot '%s' skip 1 using 1:6 with lines lw 0.6 lc rgb '#3366cc' "
+        "title 'CH0 error', \\\n"
+        "     ''   skip 1 using 1:7 with lines lw 0.6 lc rgb '#cc3333' "
+        "title 'CH1 error'\n"
+        "\n"
+        "unset multiplot\n"
+        "set output\n",
+        png_path, ao_rate, FREQUENCY,
+        csv_path, csv_path, csv_path);
+
+    // --- Also display interactively if X11/Qt is available ---
+    std::fprintf(gp,
+        "\n"
+        "set terminal qt size 1400,900 enhanced font 'Helvetica,11' "
+        "persist\n"
+        "set multiplot layout 3,1 title "
+        "'Antiphase Sinusoid Loopback — Hardware Scan API "
+        "(%.0f S/s/ch, %.0f Hz)' font 'Helvetica,14'\n"
+        "\n"
+        "set ylabel 'Commanded (V)'\n"
+        "set format x ''\n"
+        "set xlabel ''\n"
+        "plot '%s' skip 1 using 1:2 with lines lw 1.2 lc rgb '#3366cc' "
+        "title 'AOUT0 (0°)', \\\n"
+        "     ''   skip 1 using 1:3 with lines lw 1.2 lc rgb '#cc3333' "
+        "title 'AOUT1 (180°)'\n"
+        "\n"
+        "set ylabel 'Measured (V)'\n"
+        "plot '%s' skip 1 using 1:4 with lines lw 0.8 lc rgb '#3366cc' "
+        "title 'CH0 readback', \\\n"
+        "     ''   skip 1 using 1:5 with lines lw 0.8 lc rgb '#cc3333' "
+        "title 'CH1 readback'\n"
+        "\n"
+        "set ylabel 'Error (mV)'\n"
+        "set xlabel 'Time (ms)'\n"
+        "set format x '%%g'\n"
+        "plot '%s' skip 1 using 1:6 with lines lw 0.6 lc rgb '#3366cc' "
+        "title 'CH0 error', \\\n"
+        "     ''   skip 1 using 1:7 with lines lw 0.6 lc rgb '#cc3333' "
+        "title 'CH1 error'\n"
+        "\n"
+        "unset multiplot\n",
+        ao_rate, FREQUENCY,
+        csv_path, csv_path, csv_path);
+
+    pclose(gp);
+    std::printf("Plot saved to %s\n", png_path);
+}
+
+
+int main() {
+    UlError err;
+
+    // --- Discover devices ---
+    DaqDeviceDescriptor descriptors[MAX_DEV_COUNT];
+    unsigned int num_devices = MAX_DEV_COUNT;
+
+    err = ulGetDaqDeviceInventory(ANY_IFC, descriptors, &num_devices);
+    check(err, "ulGetDaqDeviceInventory");
+
+    if (num_devices == 0) {
+        std::fprintf(stderr, "ERROR: No MCC DAQ devices found.\n");
+        return 1;
+    }
+
+    std::printf("Found %u device(s):\n", num_devices);
+    for (unsigned i = 0; i < num_devices; i++) {
+        std::printf("  [%u] %s  (serial: %s)\n",
+                    i, descriptors[i].productName, descriptors[i].uniqueId);
+    }
+
+    // --- Connect ---
+    DaqDeviceHandle handle = ulCreateDaqDevice(descriptors[0]);
+    if (handle == 0) {
+        std::fprintf(stderr, "ERROR: Failed to create DAQ device handle.\n");
+        return 1;
+    }
+
+    err = ulConnectDaqDevice(handle);
+    check(err, "ulConnectDaqDevice");
+    std::printf("\nConnected to %s\n", descriptors[0].productName);
+
+    // --- Allocate buffers ---
+    std::vector<double> ao_buffer(SAMPLES_PER_CHANNEL * AO_NUM_CH);
+    std::vector<double> ai_buffer(SAMPLES_PER_CHANNEL * AI_NUM_CH, 0.0);
+
+    // --- Fill AO buffer: interleaved antiphase sinusoids ---
+    for (int i = 0; i < SAMPLES_PER_CHANNEL; i++) {
+        double phase = 2.0 * M_PI * FREQUENCY * i / SAMPLE_RATE;
+        ao_buffer[i * AO_NUM_CH + 0] = OFFSET + AMPLITUDE * std::sin(phase);
+        ao_buffer[i * AO_NUM_CH + 1] = OFFSET + AMPLITUDE * std::sin(phase + M_PI);
+    }
+
+    double duration = SAMPLES_PER_CHANNEL / SAMPLE_RATE;
+    std::printf("Waveform: %.1f Hz, +/-%.1fV, %d cycles\n",
+                FREQUENCY, AMPLITUDE, NUM_CYCLES);
+    std::printf("Scan:     %.0f S/s/ch, %d samples/ch, %.2fs duration\n\n",
+                SAMPLE_RATE, SAMPLES_PER_CHANNEL, duration);
+
+    // --- Start AI scan first ---
+    double ai_rate = SAMPLE_RATE;
+    err = ulAInScan(handle, AI_LOW_CH, AI_HIGH_CH,
+                    AI_SINGLE_ENDED, BIP10VOLTS,
+                    SAMPLES_PER_CHANNEL, &ai_rate,
+                    SO_DEFAULTIO, AINSCAN_FF_DEFAULT,
+                    ai_buffer.data());
+    check(err, "ulAInScan");
+    std::printf("AI scan started (actual rate: %.1f S/s)\n", ai_rate);
+
+    // --- Start AO scan ---
+    double ao_rate = SAMPLE_RATE;
+    err = ulAOutScan(handle, AO_LOW_CH, AO_HIGH_CH,
+                     BIP10VOLTS,
+                     SAMPLES_PER_CHANNEL, &ao_rate,
+                     SO_DEFAULTIO, AOUTSCAN_FF_DEFAULT,
+                     ao_buffer.data());
+    check(err, "ulAOutScan");
+    std::printf("AO scan started (actual rate: %.1f S/s)\n", ao_rate);
+
+    // --- Wait ---
+    err = ulAOutScanWait(handle, WAIT_UNTIL_DONE, 0, -1);
+    check(err, "ulAOutScanWait");
+    std::printf("AO scan complete.\n");
+
+    err = ulAInScanWait(handle, WAIT_UNTIL_DONE, 0, -1);
+    check(err, "ulAInScanWait");
+    std::printf("AI scan complete.\n");
+
+    ulAOutScanStop(handle);
+    ulAInScanStop(handle);
+
+    // --- De-interleave ---
+    std::vector<double> ao_ch0(SAMPLES_PER_CHANNEL);
+    std::vector<double> ao_ch1(SAMPLES_PER_CHANNEL);
+    std::vector<double> ai_ch0(SAMPLES_PER_CHANNEL);
+    std::vector<double> ai_ch1(SAMPLES_PER_CHANNEL);
+
+    for (int i = 0; i < SAMPLES_PER_CHANNEL; i++) {
+        ao_ch0[i] = ao_buffer[i * AO_NUM_CH + 0];
+        ao_ch1[i] = ao_buffer[i * AO_NUM_CH + 1];
+        ai_ch0[i] = ai_buffer[i * AI_NUM_CH + 0];
+        ai_ch1[i] = ai_buffer[i * AI_NUM_CH + 1];
+    }
+
+    // --- Error statistics ---
+    double err0_sum = 0, err1_sum = 0;
+    double err0_max = 0, err1_max = 0;
+    double err0_sq = 0, err1_sq = 0;
+
+    for (int i = 0; i < SAMPLES_PER_CHANNEL; i++) {
+        double e0 = ai_ch0[i] - ao_ch0[i];
+        double e1 = ai_ch1[i] - ao_ch1[i];
+        err0_sum += e0;
+        err1_sum += e1;
+        err0_sq += e0 * e0;
+        err1_sq += e1 * e1;
+        if (std::fabs(e0) > err0_max) err0_max = std::fabs(e0);
+        if (std::fabs(e1) > err1_max) err1_max = std::fabs(e1);
+    }
+
+    double n = static_cast<double>(SAMPLES_PER_CHANNEL);
+    std::printf("\nCH0 error: mean=%.2f mV, max=%.2f mV, rms=%.2f mV\n",
+                (err0_sum / n) * 1000.0, err0_max * 1000.0,
+                std::sqrt(err0_sq / n) * 1000.0);
+    std::printf("CH1 error: mean=%.2f mV, max=%.2f mV, rms=%.2f mV\n",
+                (err1_sum / n) * 1000.0, err1_max * 1000.0,
+                std::sqrt(err1_sq / n) * 1000.0);
+
+    // --- Cleanup DAQ ---
+    ulDisconnectDaqDevice(handle);
+    ulReleaseDaqDevice(handle);
+
+    // --- Write CSV and plot ---
+    write_csv(CSV_PATH, ao_ch0, ao_ch1, ai_ch0, ai_ch1, ai_rate);
+    plot_results(CSV_PATH, PNG_PATH, ao_rate, ai_rate);
+
+    return 0;
+}
