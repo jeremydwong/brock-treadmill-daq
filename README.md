@@ -16,6 +16,8 @@ Using UV for dependency management, install via
 and run with 
 ```uv run sinusoid```
 
+![Python Sinusoid Loopback](pyfig_sinusoid_loopback.png)
+
 # C++ quick start (linux)
 run the ```install.txt``` commands to install the ULDAQ drivers. 
 
@@ -24,3 +26,5 @@ build with
 
 run with 
 ```./sinusoid_loopback```
+
+![Sinusoid Loopback](sinusoid_loopback.png)
