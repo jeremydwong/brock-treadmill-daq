@@ -1,14 +1,32 @@
 [project]
-name = "loopback-test"
-version = "0.1.0"
-description = "USB-1608GX-2AO loopback tests"
+name = "brock-treadmill-daq"
+version = "0.2.0"
+description = "USB-1608GX-2AO driver and loopback tests"
 requires-python = ">=3.10"
 dependencies = [
-    "uldaq",
+    "pyusb>=1.2",
+    "libusb-package>=1.0",
     "matplotlib",
     "numpy",
 ]
 
+[project.optional-dependencies]
+# Only needed by compare_uldaq.py, which checks our driver against MCC's library.
+compare = ["uldaq"]
+
 [project.scripts]
 loopback = "loopback_test:main"
 sinusoid = "sinusoid_loopback:main"
+sinusoid-scan = "sinusoid_scan:main"
+compare-uldaq = "compare_uldaq:main"
+forceplate-gui = "forceplate_gui:main"
+forceplate-fit = "forceplate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mcc1608g"]
+include = ["loopback_test.py", "sinusoid_loopback.py", "sinusoid_scan.py", "compare_uldaq.py",
+           "forceplate.py", "forceplate_gui.py"]
