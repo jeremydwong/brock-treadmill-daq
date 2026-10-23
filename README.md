@@ -116,33 +116,42 @@ To quit, close the window.
 ## What you're looking at
 
 - **Left: the deck, seen from above.** The front of the treadmill is at the top.
-  The rulers show distances in metres from the **top-left corner**, which is the
-  front-left corner of the deck, position (0, 0).
-  - **x** goes down the screen, toward the **back** of the treadmill.
-  - **y** goes across the screen, toward the **right**.
-  - The numbered dark circles are the four load cells.
+  The rulers measure from the **top-left corner**, which is the front-left
+  corner of the deck: across the top is "right of the left edge", down the
+  side is "back from the front edge". The numbered dark circles are the four
+  load cells.
 - **Right: the controls.**
-- **Bottom: the signals.** One plot per load cell, with its X, Y and Z channels.
+- **Middle: the signals.** One plot per load cell, with its X, Y and Z channels.
+- **Bottom: the data folder**, where everything is saved.
 
-## First: set the deck size
+## First: set the deck size and units
 
-Above the deck drawing, type the deck's **length x** (front to back) and
-**width y** (side to side) in metres, and click **Set size**. Do this before
-you capture anything; a session's deck size can't be changed later.
+Above the deck drawing, pick **m** or **ft**, type the deck's **side to side**
+and **front to back** size, and click **Set size**. Do this before you capture
+anything; a session's deck size can't be changed later. Switching between m and
+ft only changes what's shown; you can switch any time.
 
 ## Taking a calibration session
 
 1. **Take the weight off the deck** and click **Tare (no load)**. The app records 5
    seconds of "nothing on the deck" as the zero point.
 2. **Put a known weight on the deck** (or pull with a known force).
-3. **Click on the deck drawing** where the weight is. A red marker appears.
+3. **Say where it is.** Either click on the deck drawing (a red marker appears
+   and the boxes fill in), or type into the three boxes:
+   - how far **right of the left edge**
+   - how far **back from the front edge**
+   - how far **below the deck surface**: `0` if the force is on the deck
+     surface; if you're pulling on the frame underneath, how far down (e.g.
+     `0.12` m for 12 cm below). Always a positive number.
 4. **Choose the direction** the force pushes the deck:
    - **down**: a weight sitting on the deck
    - **forward / back / left / right**: a sideways pull (for example a rope over a pulley)
-5. **Type the mass in kg.** The app shows the force in newtons underneath.
-6. **Height z:** leave it at `0` if the force is applied at the deck surface.
-   If you're pulling on the frame *below* the deck, enter how far below as a
-   **negative** number in metres (e.g. `-0.12` for 12 cm below).
+5. **Type the load** and pick its unit. **kg** or **lb** means a mass (a weight
+   plate); the app works out its weight. **N** or **lbf** means a force you
+   measured (for example with a force gauge). The force in N and lbf is shown
+   next to it.
+6. **Notes** (optional): anything worth remembering, e.g. "2 × 10 kg plates,
+   belt off". Notes are saved with every capture until you change them.
 7. Click **Capture load** and **keep everything still** for 5 seconds.
 8. Repeat steps 2–7 with weights in many different places and in all five
    directions. Grey dots on the drawing show where you've already measured.
@@ -163,32 +172,46 @@ Click **Fit**. A window shows the calibration matrix and how well it matches
 each capture. It also saves the result in the session folder. You can also
 run the fit later from the terminal:
 ```
-uv run forceplate.py calib_data/<session folder name>
+uv run forceplate.py "<session folder>"
 ```
 
 ## Where your data goes
 
-Everything is saved in the `calib_data` folder inside the project folder.
+Everything is saved in the **data folder** shown at the bottom of the window.
+By default that's **`ForcePlate data` inside your Documents folder**. Click
+**Change...** to pick another folder (the app remembers it next time) and
+**Open** to see the files.
+
 Each session gets its own folder named with the date and time it started, e.g.
-`calib_data/20261019-142957/`:
+`ForcePlate data/20261019-142957/`:
 
 | File | What's in it |
 |---|---|
+| `captures_log.csv` | **Open this in Excel.** One row per capture: date, time, tare or load, the load and where it was applied (as you typed it, and in metres), the deck size, and your notes |
 | `trial_001.csv`, `trial_002.csv`, … | One per capture: 5 s × 1000 samples/s of all 12 channels, in volts |
-| `session.json` | Deck size, which channel is which, and for every capture: tare or load, where it was applied, direction, mass |
+| `session.json` | The same information as the log, which the fit reads |
 | `calibration.json`, `calibration_matrix.csv` | Made by **Fit**: the 6 × 12 calibration matrix |
+
+If `captures_log.csv` is open in Excel when you capture, Windows won't let the
+app update it. The capture is still saved, the status line says so, and the
+log catches up on the next capture after you close Excel.
+
+If saving ever fails (folder on an unplugged drive, disk full), the capture is
+saved as `forceplate_unsaved_<date>.csv` in your home folder instead, and the
+app tells you.
 
 To add more captures to an old session instead of starting a new one:
 ```
-uv run forceplate_gui.py --session calib_data/20261019-142957
+uv run forceplate_gui.py --session "<session folder>"
 ```
 
 The calibration matrix turns the 12 tared voltages into the forces and moments on the deck:
 ```
 [Fx, Fy, Fz, Mx, My, Mz] = matrix × (volts − tare volts)
 ```
-Forces are in newtons and moments in newton-metres, about the deck's front-left corner.
-Axes: x toward the back, y toward the right, z up.
+Forces are in newtons and moments in newton-metres, about the deck's front-left
+corner. Axes: **x to the right, y toward the back, z down** (into the deck). This is the
+usual force-plate convention (AMTI, Bertec): someone standing on the deck gives a positive Fz.
 
 ---
 
@@ -249,20 +272,31 @@ Close the terminal and open a new one. If that doesn't help, repeat step 2.
 **`ERROR ...` in the status line during a capture**
 Unplug and replug the DAQ, then restart the app. Your earlier captures are already saved.
 
+**Checking a new computer can keep up with the DAQ**
+With the DAQ plugged in (and the app closed), run
+```
+uv run capture_check.py
+```
+It takes a few full captures while deliberately keeping the computer busy, saves
+each one and reads it back. It should finish with `PASS`.
+
 **Something else went wrong in `uv sync`**
 Make sure you're in the project folder. Type `ls` (Mac/Linux) or `dir` (Windows) and
 you should see `forceplate_gui.py` in the list. Then run `uv sync` again.
 
 ## Getting the latest version
 - **If you used git:** `git pull`, then `uv sync`.
-- **If you downloaded a ZIP:** download the new ZIP, then **copy your `calib_data`
-  folder from the old project folder into the new one** so you don't lose your data.
+- **If you downloaded a ZIP:** download the new ZIP and replace the old project
+  folder. Your data are in the data folder (Documents/ForcePlate data), not in
+  the project folder, so they're safe.
 
 ---
 
 # For developers
 
 Other programs in this repository (run them the same way, from the project folder):
+- `uv run loopback_live.py`: live plot of all 12 inputs while AOUT0 plays a sine (`--help` for options)
+- `uv run capture_check.py`: back-to-back full captures under load, to check a computer keeps up
 - `uv run loopback`: step voltages on AOUT0/1, read back on CH0/1
 - `uv run sinusoid`: software-timed antiphase sinusoid loopback
 - `uv run sinusoid-scan`: hardware-paced antiphase sinusoid loopback

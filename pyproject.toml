@@ -21,6 +21,7 @@ sinusoid-scan = "sinusoid_scan:main"
 compare-uldaq = "compare_uldaq:main"
 forceplate-gui = "forceplate_gui:main"
 forceplate-fit = "forceplate:main"
+capture-check = "capture_check:main"
 
 [tool.uv]
 # Always use uv's own Python builds, which include tkinter (the GUI toolkit).
@@ -34,4 +35,5 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["mcc1608g"]
 include = ["loopback_test.py", "sinusoid_loopback.py", "sinusoid_scan.py", "compare_uldaq.py",
-           "forceplate.py", "forceplate_gui.py"]
+           "forceplate.py", "forceplate_gui.py", "tk_env.py",
+           "loopback_live.py", "capture_check.py"]

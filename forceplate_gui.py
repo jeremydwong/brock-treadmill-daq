@@ -2,15 +2,20 @@
 """
 Force-plate calibration GUI.
 
-Click on the deck (top view) where the load is applied, pick its direction,
-enter the mass, and press Capture. Each capture records all 12 load-cell
-channels for 5 s at 1 kHz into a CSV, and its location, direction and
-load go into session.json (see forceplate.py for the file layout and the fit).
+Click on the deck (top view) where the load is applied, or type how far it is
+right of the left edge, back from the front edge and below the deck; pick its
+direction, enter the mass or force, and press Capture. Each capture records all
+12 load-cell channels for 5 s at 1 kHz into a CSV, and its location, direction,
+load and notes go into session.json and captures_log.csv (see forceplate.py for
+the file layout and the fit).
+
+Sessions are saved under the data folder shown in the window (by default
+Documents/ForcePlate data); "Change..." picks another and it is remembered.
 
 Workflow for one session:
   1. Deck unloaded -> "Tare (no load)".
-  2. Put a known mass on (or pull with a known force) -> click its location,
-     pick the direction -> "Capture load".
+  2. Put a known mass on (or pull with a known force) -> click or type its
+     location, pick the direction -> "Capture load".
   3. Repeat 2 at many locations and in every direction; re-tare now and then.
      Each load is paired with the latest tare.
   4. "Fit" (or `uv run forceplate.py <session>`) solves for the matrix.
@@ -21,13 +26,12 @@ load cells. Unhook that channel's load-cell lead first: two outputs on one
 input fight each other.
 
 Usage:
-  uv run forceplate_gui.py                                # new session in calib_data/
-  uv run forceplate_gui.py --session calib_data/2026...   # keep adding to one
+  uv run forceplate_gui.py                                # new session in the data folder
+  uv run forceplate_gui.py --session "<data folder>/2026..."   # keep adding to one
   uv run forceplate_gui.py --length 1.8 --width 0.7       # deck size in metres
 
 Coordinates are in the deck frame of forceplate.py: origin at the front-left
-corner (top left of the drawing), +x toward the back, +y toward the right,
-+z up. Heights are 0 on the deck surface and negative below it.
+corner (top left of the drawing), +x right, +y back, +z down (below the deck).
 """
 
 from __future__ import annotations
@@ -35,28 +39,19 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
-import glob
 import io
+import json
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 
-# uv's standalone Pythons look for Tcl/Tk's script library relative to the venv,
-# where it isn't, and Tk() then fails with "Can't find a usable init.tcl".
-# Point them at the base install (lib/ on macOS and Linux, tcl/ on Windows).
-# No effect if the variables are already set.
-for _pattern, _marker, _var in (("tcl[0-9]*", "init.tcl", "TCL_LIBRARY"),
-                                ("tk[0-9]*", "tk.tcl", "TK_LIBRARY")):
-    _found = sorted(d for sub in ("lib", "tcl")
-                    for d in glob.glob(os.path.join(sys.base_prefix, sub, _pattern))
-                    if os.path.isfile(os.path.join(d, _marker)))
-    if _found:
-        os.environ.setdefault(_var, _found[-1])
-
+import tk_env  # noqa: F401  (must come before tkinter)
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -66,15 +61,18 @@ import forceplate as fp
 from mcc1608g import USB1608G, AiMode, AiRange, DaqError
 
 # --- Deck (edit to match the treadmill, pass --length/--width, or set in the GUI) ---
-DECK_LENGTH_M = 1.6       # front to back, along +x
-DECK_WIDTH_M = 0.6        # left to right, along +y
+DECK_LENGTH_M = 1.6       # front to back, along +y
+DECK_WIDTH_M = 0.6        # left to right, along +x
 # Which corner each load cell sits under. Only used for the drawing.
 CELL_CORNERS = {"1": ("front", "left"), "2": ("front", "right"),
                 "3": ("back", "right"), "4": ("back", "left")}
 
 AI_MODE = AiMode.SINGLE_ENDED
 AI_RANGE = AiRange.BIP10V
-OUT_DIR = Path("calib_data")
+# Where sessions go unless the person picks another folder (remembered in SETTINGS).
+DEFAULT_DATA_DIR = Path.home() / "Documents" / "ForcePlate data"
+SETTINGS = Path.home() / ".forceplate_gui.json"
+MIN_FREE_MB = 50          # refuse to capture with less disk space than this (a capture is ~0.7 MB)
 
 MONITOR_BLOCK = 100       # samples per live-view scan (0.1 s at 1 kHz)
 MONITOR_WINDOW_S = 3.0    # seconds of history in the live view
@@ -82,7 +80,8 @@ AO_RATE = 1000.0          # DAC updates per second for the loopback sine
 AO_SINE_SECONDS = 30 * 60 # a sine runs this long, then the output holds
 
 AXIS_COLORS = {"X": "#3366cc", "Y": "#dd8800", "Z": "#33aa55"}
-DECK_PX = 520             # longest side of the deck drawing
+MONO = "TkFixedFont"      # the platform's monospace font (Menlo, Consolas, ...)
+DECK_PX = 520             # longest side of the deck drawing, on a tall enough screen
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +183,10 @@ class App(tk.Tk):
                  deck_length: float = DECK_LENGTH_M, deck_width: float = DECK_WIDTH_M):
         super().__init__()
         self.title("Force-plate calibration")
-        self.deck_length = deck_length
-        self.deck_width = deck_width
+        self.deck_length = deck_length      # metres, front to back (y)
+        self.deck_width = deck_width        # metres, side to side (x)
+        self.settings = load_settings()
+        self.data_dir = Path(self.settings.get("data_dir", DEFAULT_DATA_DIR))
         self.session: fp.Session | None = fp.Session.load(session_dir) if session_dir else None
         if self.session:
             deck = self.session.meta["deck"]
@@ -197,11 +198,14 @@ class App(tk.Tk):
             self.worker = DaqWorker(daq)
             self.worker.start()
 
-        self.location: tuple[float, float] | None = None
+        self.location: tuple[float, float] | None = None   # (x, y) metres, from the boxes
         self.busy = False
         n_window = int(MONITOR_WINDOW_S * fp.SAMPLE_RATE)
         self.live_buffer = np.full((n_window, 12), np.nan)
 
+        # Fit small laptop screens: shrink the deck drawing, and let the plot
+        # (the only stretchy row) give up the rest.
+        self.deck_px = max(280, min(DECK_PX, self.winfo_screenheight() - 420))
         self._build_deck()
         self._build_controls()
         self._build_plot()
@@ -216,6 +220,10 @@ class App(tk.Tk):
         self._update_buttons()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._poll)
+        self.update_idletasks()
+        max_h = self.winfo_screenheight() - 80
+        if self.winfo_reqheight() > max_h:
+            self.geometry(f"{self.winfo_reqwidth()}x{max_h}+0+0")
 
     # -- layout ---------------------------------------------------------------
     def _build_deck(self):
@@ -224,13 +232,22 @@ class App(tk.Tk):
 
         dims = ttk.Frame(frame)
         dims.pack(fill="x", padx=6, pady=(4, 0))
-        self.length_var = tk.StringVar(value=f"{self.deck_length:g}")
-        self.width_var = tk.StringVar(value=f"{self.deck_width:g}")
-        ttk.Label(dims, text="length x (m)").pack(side="left")
-        ttk.Entry(dims, textvariable=self.length_var, width=6).pack(side="left", padx=(4, 12))
-        ttk.Label(dims, text="width y (m)").pack(side="left")
-        ttk.Entry(dims, textvariable=self.width_var, width=6).pack(side="left", padx=4)
-        ttk.Button(dims, text="Set size", command=self._set_deck_size).pack(side="left", padx=8)
+        ttk.Label(dims, text="Deck size:").pack(side="left")
+        self.width_var = tk.StringVar()
+        self.length_var = tk.StringVar()
+        ttk.Label(dims, text="side to side").pack(side="left", padx=(6, 2))
+        ttk.Entry(dims, textvariable=self.width_var, width=6).pack(side="left")
+        ttk.Label(dims, text="front to back").pack(side="left", padx=(10, 2))
+        ttk.Entry(dims, textvariable=self.length_var, width=6).pack(side="left")
+        self.length_unit = tk.StringVar(value=self.settings.get("length_unit", "m"))
+        if self.length_unit.get() not in fp.LENGTH_UNITS:
+            self.length_unit.set("m")
+        units = ttk.Combobox(dims, textvariable=self.length_unit, width=4, state="readonly",
+                             values=list(fp.LENGTH_UNITS))
+        units.pack(side="left", padx=6)
+        units.bind("<<ComboboxSelected>>", lambda _e: self._on_units_changed())
+        ttk.Button(dims, text="Set size", command=self._set_deck_size).pack(side="left", padx=4)
+        self._show_deck_size()
 
         # Room around the deck for the rulers (top, left) and labels.
         self.margin_left, self.margin_top, self.margin_right, self.margin_bottom = 80, 56, 24, 30
@@ -242,32 +259,92 @@ class App(tk.Tk):
         self.location_label.pack(pady=(0, 4))
 
     def _resize_canvas(self):
-        self.scale = DECK_PX / max(self.deck_length, self.deck_width)   # px per metre
+        self.scale = self.deck_px / max(self.deck_length, self.deck_width)   # px per metre
         self.canvas.config(
             width=self.deck_width * self.scale + self.margin_left + self.margin_right,
             height=self.deck_length * self.scale + self.margin_top + self.margin_bottom)
 
+    # -- data folder --------------------------------------------------------------
+    def _save_settings(self, **changes):
+        self.settings.update(changes)
+        try:
+            SETTINGS.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+        except OSError:
+            pass    # only a convenience; the defaults still work
+
+    def _choose_data_dir(self):
+        folder = filedialog.askdirectory(title="Save sessions in...", mustexist=False,
+                                         initialdir=str(self.data_dir))
+        if not folder:
+            return
+        self.data_dir = Path(folder)
+        self._save_settings(data_dir=str(self.data_dir))
+        if self.session is not None and self.session.trials:
+            self.session = None     # the next capture starts a session in the new folder
+        self._refresh_trials()
+        self._redraw_deck()
+
+    def _open_data_folder(self):
+        folder = self.session.folder if self.session else self.data_dir
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as e:
+            messagebox.showerror("Open folder", f"Could not open {folder}:\n{e}")
+
+    # -- units: the boxes show self.length_unit; everything stored is metres --
+    def _unit(self) -> float:
+        """Metres per displayed length unit."""
+        return fp.LENGTH_UNITS[self.length_unit.get()]
+
+    def _show_len(self, metres: float) -> str:
+        return f"{round(metres / self._unit(), 3):g}"
+
+    def _show_deck_size(self):
+        self.width_var.set(self._show_len(self.deck_width))
+        self.length_var.set(self._show_len(self.deck_length))
+
+    def _on_units_changed(self):
+        self._show_deck_size()
+        if self.location is not None:
+            self.x_var.set(self._show_len(self.location[0]))
+            self.y_var.set(self._show_len(self.location[1]))
+        try:
+            self.z_var.set(self._show_len(float(self.z_var.get()) * self._last_unit))
+        except ValueError:
+            pass
+        self._last_unit = self._unit()
+        for label in self.unit_labels:
+            label.config(text=self.length_unit.get())
+        self._save_settings(length_unit=self.length_unit.get())
+        self._redraw_deck()
+
     def _set_deck_size(self):
         try:
-            length, width = float(self.length_var.get()), float(self.width_var.get())
+            width = float(self.width_var.get()) * self._unit()
+            length = float(self.length_var.get()) * self._unit()
         except ValueError:
-            messagebox.showerror("Deck size", "Length and width must be numbers.")
+            messagebox.showerror("Deck size", "Side to side and front to back must be numbers.")
             return
         if length <= 0 or width <= 0:
-            messagebox.showerror("Deck size", "Length and width must be positive.")
+            messagebox.showerror("Deck size", "Side to side and front to back must be positive.")
             return
         if self.session is not None and self.session.trials:
             messagebox.showerror("Deck size", "This session already has captures at the old "
                                               "size. Start a New session to change it.")
-            self.length_var.set(f"{self.deck_length:g}")
-            self.width_var.set(f"{self.deck_width:g}")
+            self._show_deck_size()
             return
         self.deck_length, self.deck_width = length, width
         if self.session is not None:
             self.session.meta["deck"].update(length_m=length, width_m=width)
             self.session.save()
-        self.location = None
-        self.location_label.config(text="No location chosen")
+        self.x_var.set("")
+        self.y_var.set("")
         self._resize_canvas()
         self._redraw_deck()
         self._update_buttons()
@@ -285,18 +362,44 @@ class App(tk.Tk):
         for i, name in enumerate(fp.DIRECTIONS):
             ttk.Radiobutton(dirs, text=name, value=name, variable=self.direction,
                             command=self._redraw_deck).grid(row=0, column=i, padx=2)
-        self.mass = tk.StringVar(value="20.0")
-        self.height = tk.StringVar(value="0.0")
         row = ttk.Frame(load)
-        row.pack(fill="x", padx=6, pady=(0, 6))
-        ttk.Label(row, text="mass (kg)").pack(side="left")
-        ttk.Entry(row, textvariable=self.mass, width=8).pack(side="left", padx=(4, 12))
-        ttk.Label(row, text="height z (m, below deck < 0)").pack(side="left")
-        ttk.Entry(row, textvariable=self.height, width=6).pack(side="left", padx=4)
-        self.force_label = ttk.Label(load, text="")
-        self.force_label.pack(anchor="w", padx=6, pady=(0, 4))
-        self.mass.trace_add("write", lambda *_: self._update_force_label())
+        row.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(row, text="load").pack(side="left")
+        self.load_amount = tk.StringVar(value="20.0")
+        ttk.Entry(row, textvariable=self.load_amount, width=8).pack(side="left", padx=4)
+        self.load_unit = tk.StringVar(value=self.settings.get("load_unit", "kg"))
+        if self.load_unit.get() not in fp.FORCE_UNITS:
+            self.load_unit.set("kg")
+        w = ttk.Combobox(row, textvariable=self.load_unit, width=4, state="readonly",
+                         values=list(fp.FORCE_UNITS))
+        w.pack(side="left")
+        w.bind("<<ComboboxSelected>>",
+               lambda _e: self._save_settings(load_unit=self.load_unit.get()))
+        self.force_label = ttk.Label(row, text="")
+        self.force_label.pack(side="left", padx=8)
+        ttk.Label(load, text="kg / lb = a mass hung or stacked (weight is worked out); "
+                             "N / lbf = a measured force", foreground="#666"
+                  ).pack(anchor="w", padx=6)
+        self.load_amount.trace_add("write", lambda *_: self._update_force_label())
+        self.load_unit.trace_add("write", lambda *_: self._update_force_label())
         self._update_force_label()
+
+        # Where: click the deck, or type it
+        where = ttk.Frame(load)
+        where.pack(fill="x", padx=6, pady=(6, 6))
+        self.x_var, self.y_var, self.z_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="0")
+        self.unit_labels = []
+        for r, (text, var) in enumerate((("right of the left edge", self.x_var),
+                                         ("back from the front edge", self.y_var),
+                                         ("below the deck surface", self.z_var))):
+            ttk.Entry(where, textvariable=var, width=8).grid(row=r, column=0, pady=1)
+            unit = ttk.Label(where, text=self.length_unit.get(), width=3)
+            unit.grid(row=r, column=1, padx=(2, 4))
+            self.unit_labels.append(unit)
+            ttk.Label(where, text=text).grid(row=r, column=2, sticky="w")
+        self._last_unit = self._unit()
+        self.x_var.trace_add("write", lambda *_: self._on_location_typed())
+        self.y_var.trace_add("write", lambda *_: self._on_location_typed())
 
         # Capture
         cap = ttk.LabelFrame(side, text=f"Capture ({fp.CAPTURE_SECONDS:g} s at "
@@ -314,17 +417,32 @@ class App(tk.Tk):
         self.live_check = ttk.Checkbutton(buttons, text="Live view", variable=self.live,
                                           command=self._on_live_toggle)
         self.live_check.pack(side="right")
+        row = ttk.Frame(cap)
+        row.pack(fill="x", padx=6, pady=(0, 4))
+        ttk.Label(row, text="notes").pack(side="left")
+        self.notes = tk.StringVar()
+        ttk.Entry(row, textvariable=self.notes).pack(side="left", fill="x", expand=True, padx=4)
         self.progress = ttk.Progressbar(cap, mode="determinate", maximum=100)
         self.progress.pack(fill="x", padx=6, pady=(0, 4))
         self.status = ttk.Label(cap, text="", wraplength=380, justify="left")
         self.status.pack(fill="x", padx=6, pady=(0, 6))
 
-        # Session
-        sess = ttk.LabelFrame(side, text="Session")
-        sess.pack(fill="both", expand=True, pady=(0, 6))
-        self.session_label = ttk.Label(sess, text="", wraplength=380)
+        tabs = ttk.Notebook(side)
+        tabs.pack(fill="both", expand=True)
+
+        # Session, and where it is saved
+        sess = ttk.Frame(tabs)
+        tabs.add(sess, text="Session")
+        data = ttk.Frame(sess)
+        data.pack(fill="x", padx=6, pady=(6, 0))
+        ttk.Label(data, text="Data folder:").pack(side="left")
+        ttk.Button(data, text="Open", command=self._open_data_folder).pack(side="right")
+        ttk.Button(data, text="Change...", command=self._choose_data_dir).pack(side="right", padx=4)
+        self.data_label = ttk.Label(sess, text="", wraplength=400, foreground="#444")
+        self.data_label.pack(anchor="w", padx=6)
+        self.session_label = ttk.Label(sess, text="", wraplength=400)
         self.session_label.pack(anchor="w", padx=6, pady=4)
-        self.trial_list = tk.Listbox(sess, height=8, font=("Menlo", 11))
+        self.trial_list = tk.Listbox(sess, height=7, font=MONO)
         self.trial_list.pack(fill="both", expand=True, padx=6)
         self.trial_list.bind("<<ListboxSelect>>", self._on_trial_select)
         row = ttk.Frame(sess)
@@ -334,8 +452,8 @@ class App(tk.Tk):
         ttk.Button(row, text="Fit", command=self._fit).pack(side="right")
 
         # Loopback
-        loop = ttk.LabelFrame(side, text="Loopback test")
-        loop.pack(fill="x")
+        loop = ttk.Frame(tabs)
+        tabs.add(loop, text="Loopback test")
         self.loopback = tk.BooleanVar(value=False)
         ttk.Checkbutton(loop, text="Loopback mode (captures are saved as 'loopback', "
                                    "not used by the fit)",
@@ -387,7 +505,7 @@ class App(tk.Tk):
     def _build_plot(self):
         frame = ttk.LabelFrame(self, text="Signals")
         frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8))
-        self.figure = Figure(figsize=(10, 4.2), dpi=90)
+        self.figure = Figure(figsize=(10, 3.4), dpi=90)
         self.axes = self.figure.subplots(1, 4, sharex=True)
         self.lines = []
         for cell, ax in enumerate(self.axes, start=1):
@@ -405,42 +523,46 @@ class App(tk.Tk):
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(1, weight=1, minsize=160)   # never squash the plot to nothing
 
     # -- deck drawing ---------------------------------------------------------
     def _to_screen(self, x: float, y: float) -> tuple[float, float]:
-        """Deck metres -> canvas pixels. Origin top left, +x (back) down, +y (right) right."""
-        return self.margin_left + y * self.scale, self.margin_top + x * self.scale
+        """Deck metres -> canvas pixels. Origin top left, +x (right) right, +y (back) down."""
+        return self.margin_left + x * self.scale, self.margin_top + y * self.scale
 
     def _to_deck(self, sx: float, sy: float) -> tuple[float, float]:
-        return (sy - self.margin_top) / self.scale, (sx - self.margin_left) / self.scale
+        return (sx - self.margin_left) / self.scale, (sy - self.margin_top) / self.scale
 
     def _redraw_deck(self):
         c = self.canvas
         c.delete("all")
         L, W = self.deck_length, self.deck_width
         x0, y0 = self._to_screen(0, 0)         # front-left corner, the origin
-        x1, y1 = self._to_screen(L, W)         # back-right corner
+        x1, y1 = self._to_screen(W, L)         # back-right corner
         c.create_rectangle(x0, y0, x1, y1, fill="#f4f1ea", outline="#444", width=2)
 
-        # 10 cm grid, with a ruler along the top (y) and down the left (x)
-        label_every = 0.1 if max(L, W) <= 1.0 else 0.2
+        # Grid in the chosen unit (10 cm or 6 in), with rulers along the top
+        # (right of the left edge) and down the left (back from the front edge).
+        unit, name = self._unit(), self.length_unit.get()
+        step = 0.1 if name == "m" else 0.5
+        span = max(L, W) / unit
+        label_every = step if span <= 10 * step else 2 * step
         small = ("Helvetica", 9)
-        for gx in np.arange(0, L + 1e-9, 0.1):
-            a, b = self._to_screen(gx, 0), self._to_screen(gx, W)
-            c.create_line(*a, *b, fill="#e0dbd0")
-            c.create_line(a[0] - 5, a[1], a[0], a[1], fill="#444")
-            if abs(gx / label_every - round(gx / label_every)) < 1e-6:
-                c.create_text(a[0] - 8, a[1], text=f"{gx:.1f}", anchor="e", font=small)
-        for gy in np.arange(0, W + 1e-9, 0.1):
-            a, b = self._to_screen(0, gy), self._to_screen(L, gy)
+        for g in np.arange(0, W / unit + 1e-9, step):
+            a, b = self._to_screen(g * unit, 0), self._to_screen(g * unit, L)
             c.create_line(*a, *b, fill="#e0dbd0")
             c.create_line(a[0], a[1] - 5, a[0], a[1], fill="#444")
-            if abs(gy / label_every - round(gy / label_every)) < 1e-6:
-                c.create_text(a[0], a[1] - 8, text=f"{gy:.1f}", anchor="s", font=small)
-        c.create_text(x0, y0 - 34, text="(0,0)   y (m) →  right", anchor="w",
+            if abs(g / label_every - round(g / label_every)) < 1e-6:
+                c.create_text(a[0], a[1] - 8, text=f"{g:g}", anchor="s", font=small)
+        for g in np.arange(0, L / unit + 1e-9, step):
+            a, b = self._to_screen(0, g * unit), self._to_screen(W, g * unit)
+            c.create_line(*a, *b, fill="#e0dbd0")
+            c.create_line(a[0] - 5, a[1], a[0], a[1], fill="#444")
+            if abs(g / label_every - round(g / label_every)) < 1e-6:
+                c.create_text(a[0] - 8, a[1], text=f"{g:g}", anchor="e", font=small)
+        c.create_text(x0, y0 - 34, text=f"0   right of left edge ({name}) →", anchor="w",
                       font=("Helvetica", 10))
-        c.create_text(x0 - 58, y0 + 40, text="x (m)\n↓\nback", anchor="n",
+        c.create_text(x0 - 58, y0 + 40, text=f"back\nfrom\nfront\n({name})\n↓", anchor="n",
                       font=("Helvetica", 10), justify="center")
         c.create_text((x0 + x1) / 2, y0 + 14, text="FRONT", fill="#998",
                       font=("Helvetica", 11, "bold"))
@@ -448,7 +570,7 @@ class App(tk.Tk):
                       font=("Helvetica", 11, "bold"))
 
         for cell, (fb, lr) in CELL_CORNERS.items():
-            sx, sy = self._to_screen(0 if fb == "front" else L, 0 if lr == "left" else W)
+            sx, sy = self._to_screen(0 if lr == "left" else W, 0 if fb == "front" else L)
             c.create_oval(sx - 11, sy - 11, sx + 11, sy + 11, fill="#556", outline="")
             c.create_text(sx, sy, text=cell, fill="white", font=("Helvetica", 10, "bold"))
 
@@ -480,18 +602,41 @@ class App(tk.Tk):
 
     def _on_deck_click(self, event):
         x, y = self._to_deck(event.x, event.y)
-        if not (0 <= x <= self.deck_length and 0 <= y <= self.deck_width):
+        if not (0 <= x <= self.deck_width and 0 <= y <= self.deck_length):
             return
-        self.location = (round(x, 3), round(y, 3))
-        self.location_label.config(text=f"x = {x:.3f} m (from front)    y = {y:.3f} m (from left)")
+        # Fill the boxes; _on_location_typed then moves the marker.
+        self.x_var.set(self._show_len(x))
+        self.y_var.set(self._show_len(y))
+
+    def _on_location_typed(self):
+        """The X and Y boxes are the location; parse them whenever they change."""
+        self.location = None
+        try:
+            x = float(self.x_var.get()) * self._unit()
+            y = float(self.y_var.get()) * self._unit()
+        except ValueError:
+            self.location_label.config(text="No location chosen: click the deck or type it")
+        else:
+            tol = 1e-6
+            if -tol <= x <= self.deck_width + tol and -tol <= y <= self.deck_length + tol:
+                self.location = (x, y)
+                name = self.length_unit.get()
+                self.location_label.config(text=f"{self.x_var.get()} {name} right of the left "
+                                                f"edge, {self.y_var.get()} {name} back from the front")
+            else:
+                self.location_label.config(text="That point is off the deck.")
         self._redraw_deck()
         self._update_buttons()
 
     # -- capture --------------------------------------------------------------
+    def _force_n(self) -> float:
+        return float(self.load_amount.get()) * fp.FORCE_UNITS[self.load_unit.get()]
+
     def _update_force_label(self):
         try:
-            self.force_label.config(text=f"= {float(self.mass.get()) * fp.GRAVITY:.1f} N")
-        except ValueError:
+            n = self._force_n()
+            self.force_label.config(text=f"= {n:.1f} N = {n / fp.FORCE_UNITS['lbf']:.1f} lbf")
+        except (ValueError, KeyError):
             self.force_label.config(text="(enter a number)")
 
     def _update_buttons(self):
@@ -509,15 +654,15 @@ class App(tk.Tk):
         fields = {}
         if kind == "load":
             try:
-                mass, z = float(self.mass.get()), float(self.height.get())
+                force_n, z = self._force_n(), float(self.z_var.get()) * self._unit()
             except ValueError:
-                messagebox.showerror("Capture", "Mass and height must be numbers.")
+                messagebox.showerror("Capture", "Load and depth below the deck must be numbers.")
                 return
-            if mass <= 0:
-                messagebox.showerror("Capture", "Mass must be positive.")
+            if force_n <= 0:
+                messagebox.showerror("Capture", "Load must be positive.")
                 return
-            if z > 0:
-                messagebox.showerror("Capture", "Height is 0 on the deck surface and negative "
+            if z < 0:
+                messagebox.showerror("Capture", "Depth is 0 on the deck surface and positive "
                                                 "below it (e.g. a pull on the substructure).")
                 return
             if self.session is None or self.session.last_tare_id() is None:
@@ -526,9 +671,21 @@ class App(tk.Tk):
                         "There is no tare in this session, so the fit will skip this load.\n"
                         "Capture anyway?"):
                     return
-            fields = fp.load_trial_entry(self.direction.get(), *self.location, z, mass)
+            entered = {"load": float(self.load_amount.get()), "load_unit": self.load_unit.get(),
+                       "right": float(self.x_var.get()), "back": float(self.y_var.get()),
+                       "below": float(self.z_var.get()), "length_unit": self.length_unit.get()}
+            fields = fp.load_trial_entry(self.direction.get(), *self.location, z, force_n, entered)
         elif kind == "loopback":
             fields = {"loopback": self._loopback_settings()}
+        fields["notes"] = self.notes.get().strip()
+
+        target = self.session.folder if self.session else self.data_dir
+        free_mb = free_space_mb(target)
+        if free_mb is not None and free_mb < MIN_FREE_MB:
+            messagebox.showerror("Capture", f"Only {free_mb:.0f} MB free where the data are "
+                                            f"saved ({target}). Free some space or change the "
+                                            "data folder.")
+            return
 
         self.busy = True
         self._update_buttons()
@@ -548,11 +705,18 @@ class App(tk.Tk):
     def _on_captured(self, volts: np.ndarray, rate: float, kind: str, fields: dict):
         self.busy = False
         self.progress["value"] = 100
-        if self.session is None:
-            folder = OUT_DIR / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            info = {"product": self.daq.product_name, "serial": self.daq.serial}
-            self.session = fp.Session.create(folder, self.deck_length, self.deck_width, info)
-        entry = self.session.add_trial(volts, rate, kind, **fields)
+        expected = int(fp.CAPTURE_SECONDS * fp.SAMPLE_RATE)
+        try:
+            if volts.shape != (expected, 12) or not np.isfinite(volts).all():
+                raise ValueError(f"capture came back as {volts.shape}, expected ({expected}, 12)")
+            if self.session is None:
+                folder = self.data_dir / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                info = {"product": self.daq.product_name, "serial": self.daq.serial}
+                self.session = fp.Session.create(folder, self.deck_length, self.deck_width, info)
+            entry = self.session.add_trial(volts, rate, kind, **fields)
+        except Exception as e:
+            self._save_failed(e, volts, rate)
+            return
         self._refresh_trials()
         self._redraw_deck()
         self.live.set(False)
@@ -569,8 +733,22 @@ class App(tk.Tk):
             worst = int(np.argmax(volts.std(axis=0)))
             msg += (f"  Noisiest channel {fp.SIGNAL_NAMES[worst]}: "
                     f"std {volts[:, worst].std() * 1000:.2f} mV")
+        if self.session.log_warning:
+            msg += "\n" + self.session.log_warning
         self._set_status(msg)
         self._update_buttons()
+
+    def _save_failed(self, error: Exception, volts: np.ndarray, rate: float):
+        """Never lose a capture: if the session can't take it, put it in the home folder."""
+        rescue = Path.home() / f"forceplate_unsaved_{dt.datetime.now():%Y%m%d-%H%M%S}.csv"
+        try:
+            fp.save_capture_csv(rescue, volts, rate)
+            where = f"The raw data were saved to {rescue} instead."
+        except Exception as e2:
+            where = f"The data could not be saved anywhere ({e2})."
+        self._set_status(f"ERROR saving capture: {error}. {where}")
+        self._update_buttons()
+        messagebox.showerror("Save failed", f"{error}\n\n{where}")
 
     # -- live view and plotting ----------------------------------------------
     def _on_live_toggle(self):
@@ -617,17 +795,25 @@ class App(tk.Tk):
             lb = t.get("loopback", {})
             return f"loopback {lb.get('mode', '')} AOUT{lb.get('ao_channel', '?')}->{lb.get('wired_to', '?')}"
         tare = t.get("tare_id")
-        return (f"load {t['direction']:7} {t['mass_kg']:6.2f} kg @ "
-                f"({t['x_m']:+.2f},{t['y_m']:+.2f})  tare #{tare if tare else '-'}")
+        e = t.get("entered")
+        if e:
+            u = e["length_unit"]
+            where = f"R {e['right']:g}{u} B {e['back']:g}{u}" + (f" D {e['below']:g}{u}" if e["below"] else "")
+            amount = f"{e['load']:g} {e['load_unit']}"
+        else:
+            where = f"x {t['x_m']:.2f} y {t['y_m']:.2f} z {t['z_m']:.2f} m"
+            amount = f"{t['force_n']:.1f} N"
+        return f"load {t['direction']:7} {amount:>9} @ {where}  tare #{tare if tare else '-'}"
 
     def _refresh_trials(self):
         self.trial_list.delete(0, "end")
+        self.data_label.config(text=str(self.data_dir))
         if self.session is None:
-            self.session_label.config(text=f"New session will be created in {OUT_DIR}/ "
-                                           "on the first capture.")
+            self.session_label.config(text="A new session folder is created in the data "
+                                           "folder on the first capture.")
             return
         loads = sum(t["kind"] == "load" for t in self.session.trials)
-        self.session_label.config(text=f"{self.session.folder}   ({loads} load trials)")
+        self.session_label.config(text=f"Session {self.session.folder.name}   ({loads} load trials)")
         for t in self.session.trials:
             self.trial_list.insert("end", f"#{t['id']:<3} {self._describe(t)}")
         self.trial_list.see("end")
@@ -646,6 +832,8 @@ class App(tk.Tk):
         self.live.set(False)
         self._on_live_toggle()
         self._plot(data[:, 1:], t["rate_hz"], f"#{t['id']}  {self._describe(t)}")
+        if t.get("notes"):
+            self._set_status(f"#{t['id']} notes: {t['notes']}")
 
     def _remove_trial(self):
         t = self._selected_trial()
@@ -654,6 +842,8 @@ class App(tk.Tk):
         if messagebox.askyesno("Remove trial", f"Remove trial #{t['id']} from the session?\n"
                                                "(its CSV is renamed to .csv.removed)"):
             self.session.remove_trial(t["id"])
+            if self.session.log_warning:
+                self._set_status(self.session.log_warning)
             self._refresh_trials()
             self._redraw_deck()
 
@@ -677,7 +867,7 @@ class App(tk.Tk):
                 print("No usable load trials (each needs a tare captured before it).")
         win = tk.Toplevel(self)
         win.title("Calibration fit")
-        text = tk.Text(win, width=130, height=40, font=("Menlo", 11))
+        text = tk.Text(win, width=130, height=40, font=MONO)
         text.insert("1.0", out.getvalue())
         text.config(state="disabled")
         text.pack(fill="both", expand=True)
@@ -772,6 +962,24 @@ class App(tk.Tk):
             self.worker.send("quit")
             self.worker.join(timeout=8.0)
         self.destroy()
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def free_space_mb(folder: Path) -> float | None:
+    """Free space on the drive holding `folder` (or its nearest existing parent)."""
+    for path in (folder, *folder.parents):
+        if path.exists():
+            try:
+                return shutil.disk_usage(path).free / 1e6
+            except OSError:
+                return None
+    return None
 
 
 def main():
