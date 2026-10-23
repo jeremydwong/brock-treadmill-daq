@@ -243,8 +243,12 @@ def test_gui_tare_load_and_fit(app):
     app._on_deck_click(SimpleNamespace(x=sx, y=sy))
     assert app.location == pytest.approx((0.1, 0.4), abs=0.005)
     assert float(app.x_var.get()) == pytest.approx(0.1, abs=0.005)    # click fills the boxes
-    app._on_deck_click(SimpleNamespace(x=2, y=2))         # outside the deck: ignored
+    app._on_deck_click(SimpleNamespace(x=2, y=2))         # beside the deck: the frame
+    assert app.location[0] < 0 and app.location[1] < 0
+    assert "off the deck" in app.location_label.cget("text")
+    app._on_deck_click(SimpleNamespace(x=sx, y=sy))
     assert app.location == pytest.approx((0.1, 0.4), abs=0.005)
+    assert "off the deck" not in app.location_label.cget("text")
     app.direction.set("left")
     app.load_amount.set("12.5")
     app.notes.set("first load")
@@ -370,6 +374,33 @@ def test_gui_rejects_negative_depth(app, monkeypatch):
     assert app.session.trials[-1]["z_m"] == 0.12
 
 
+def test_gui_logs_a_pull_on_the_frame(app):
+    # Off the deck (beyond the back, past the right edge) and below the surface.
+    app.x_var.set("0.75")
+    app.y_var.set("1.9")
+    app.z_var.set("0.3")
+    app.direction.set("back")
+    assert app.location == pytest.approx((0.75, 1.9))
+    assert "on the frame" in app.location_label.cget("text")
+    assert str(app.capture_button.cget("state")) == "normal"
+    capture(app, "load")
+    t = app.session.trials[-1]
+    assert (t["x_m"], t["y_m"], t["z_m"]) == pytest.approx((0.75, 1.9, 0.3))
+    # The marker is pinned inside the drawing rather than drawn out of sight.
+    w, h = float(app.canvas.cget("width")), float(app.canvas.cget("height"))
+    sx, sy = app._on_canvas(*app._to_screen(0.75, 1.9))
+    assert 0 < sx < w and 0 < sy < h
+
+
+def test_gui_blank_depth_means_on_the_deck(app):
+    assert app.z_var.get() == ""
+    app.x_var.set("0.3")
+    app.y_var.set("0.5")
+    capture(app, "load")
+    t = app.session.trials[-1]
+    assert t["z_m"] == 0.0 and t["entered"]["below"] == 0.0
+
+
 def test_gui_typed_location_in_feet_and_lbf(app):
     app.length_unit.set("ft")
     app._on_units_changed()
@@ -377,7 +408,7 @@ def test_gui_typed_location_in_feet_and_lbf(app):
     app.x_var.set("1")
     app.y_var.set("4")
     assert app.location == pytest.approx((0.3048, 1.2192))
-    app.y_var.set("99")                                  # off the deck
+    app.y_var.set("abc")                                 # not a number: can't log
     assert app.location is None and str(app.capture_button.cget("state")) == "disabled"
     app.y_var.set("4")
     app.z_var.set("0.5")

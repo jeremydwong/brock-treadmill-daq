@@ -5,7 +5,7 @@ Force-plate calibration GUI.
 Left: the deck from above, with each load cell's X/Y/Z force plotted beside
 the corner it sits under, and the deck size below. Right: the few things set
 for every capture, the Tare and Log buttons, and a Details section for the
-rest (data folder, session list, fit, depth below the deck, loopback test).
+rest (data folder, session list, fit, scale, loopback test).
 
 Click on the deck where the load is applied, or type how far it is right of
 the left edge and back from the front edge; pick its direction, enter the mass
@@ -364,10 +364,11 @@ class App(tk.Tk):
         if self.location is not None:
             self.x_var.set(self._show_len(self.location[0]))
             self.y_var.set(self._show_len(self.location[1]))
-        try:
-            self.z_var.set(self._show_len(float(self.z_var.get()) * self._last_unit))
-        except ValueError:
-            pass
+        if self.z_var.get().strip():
+            try:
+                self.z_var.set(self._show_len(float(self.z_var.get()) * self._last_unit))
+            except ValueError:
+                pass
         self._last_unit = self._unit()
         for label in self.unit_labels:
             label.config(text=self.length_unit.get())
@@ -434,21 +435,26 @@ class App(tk.Tk):
         self.load_amount.trace_add("write", lambda *_: self._update_force_label())
         self.load_unit.trace_add("write", lambda *_: self._update_force_label())
 
-        # Where: click the deck, or type it. Depth below the deck is in Details.
-        self.x_var, self.y_var, self.z_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="0")
+        # Where: click the drawing, or type it. Points off the deck (on the
+        # frame) are fine; depth is optional, blank meaning the deck surface.
+        self.x_var, self.y_var, self.z_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.unit_labels = []
-        for r, (text, var) in enumerate((("right of left edge", self.x_var),
-                                         ("back from front edge", self.y_var)), start=2):
+        for r, (text, var, hint) in enumerate((
+                ("right of left edge", self.x_var, ""),
+                ("back from front edge", self.y_var, ""),
+                ("below deck surface", self.z_var, "optional: blank = on the deck")), start=2):
             ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 6))
             ttk.Entry(form, textvariable=var, width=8).grid(row=r, column=1, pady=2)
             unit = ttk.Label(form, text=self.length_unit.get())
             unit.grid(row=r, column=2, padx=(2, 4), sticky="w")
             self.unit_labels.append(unit)
+            if hint:
+                ttk.Label(form, text=hint, foreground="#666").grid(row=r, column=3, sticky="w")
         self._last_unit = self._unit()
 
-        ttk.Label(form, text="notes").grid(row=4, column=0, sticky="w")
+        ttk.Label(form, text="notes").grid(row=5, column=0, sticky="w")
         self.notes = tk.StringVar()
-        ttk.Entry(form, textvariable=self.notes).grid(row=4, column=1, columnspan=3,
+        ttk.Entry(form, textvariable=self.notes).grid(row=5, column=1, columnspan=3,
                                                       sticky="ew", pady=2)
         form.columnconfigure(3, weight=1)
         self.location_label = ttk.Label(main, text="", foreground="#444", wraplength=400)
@@ -506,7 +512,7 @@ class App(tk.Tk):
             self.details.pack(fill="both", expand=True, pady=(4, 0))
         else:
             self.details_button.config(text="▸ Details: data folder, session list, fit, "
-                                            "depth, scale, loopback")
+                                            "scale, loopback")
             self.details.pack_forget()
 
     def _build_session_tab(self, tabs: ttk.Notebook):
@@ -532,18 +538,7 @@ class App(tk.Tk):
 
     def _build_more_tab(self, tabs: ttk.Notebook):
         more = ttk.Frame(tabs)
-        tabs.add(more, text="Depth and scale")
-        row = ttk.Frame(more)
-        row.pack(fill="x", padx=6, pady=6)
-        ttk.Entry(row, textvariable=self.z_var, width=8).pack(side="left")
-        unit = ttk.Label(row, text=self.length_unit.get())
-        unit.pack(side="left", padx=(2, 4))
-        self.unit_labels.append(unit)
-        ttk.Label(row, text="below the deck surface").pack(side="left")
-        ttk.Label(more, text="0 for a load on the deck. For a pull on the frame underneath, "
-                             "how far below the surface (always positive).",
-                  wraplength=400, foreground="#666").pack(anchor="w", padx=6)
-
+        tabs.add(more, text="Scale")
         lay = self.layout
         lines = [f"Load-cell positions and force scale: {lay.path.name}"]
         for i, cell in enumerate("1234"):
@@ -617,6 +612,11 @@ class App(tk.Tk):
         """Deck metres -> canvas pixels. Origin top left, +x (right) right, +y (back) down."""
         return self.margin_left + x * self.scale, self.margin_top + y * self.scale
 
+    def _on_canvas(self, sx: float, sy: float, pad: float = 12) -> tuple[float, float]:
+        """Pull a point beyond the drawing back to its edge, so its marker stays visible."""
+        w, h = float(self.canvas.cget("width")), float(self.canvas.cget("height"))
+        return min(max(sx, pad), w - pad), min(max(sy, pad), h - pad)
+
     def _to_deck(self, sx: float, sy: float) -> tuple[float, float]:
         return (sx - self.margin_left) / self.scale, (sy - self.margin_top) / self.scale
 
@@ -665,11 +665,11 @@ class App(tk.Tk):
         if self.session:
             for t in self.session.trials:
                 if t["kind"] == "load":
-                    sx, sy = self._to_screen(t["x_m"], t["y_m"])
+                    sx, sy = self._on_canvas(*self._to_screen(t["x_m"], t["y_m"]))
                     c.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill="#aaa", outline="")
 
         if self.location is not None:
-            sx, sy = self._to_screen(*self.location)
+            sx, sy = self._on_canvas(*self._to_screen(*self.location))
             self._draw_force(sx, sy, self.direction.get())
         self._draw_cop()
 
@@ -679,7 +679,7 @@ class App(tk.Tk):
         c.delete("cop")
         if self.cop is None:
             return
-        sx, sy = self._to_screen(*self.cop)
+        sx, sy = self._on_canvas(*self._to_screen(*self.cop))
         c.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, outline=COP_COLOR, width=2, tags="cop")
         c.create_line(sx - 13, sy, sx + 13, sy, fill=COP_COLOR, width=2, tags="cop")
         c.create_line(sx, sy - 13, sx, sy + 13, fill=COP_COLOR, width=2, tags="cop")
@@ -695,15 +695,14 @@ class App(tk.Tk):
             c.create_line(sx - 7, sy + 7, sx + 7, sy - 7, fill=red, width=2)
             return
         fx, fy, _ = fp.DIRECTIONS[direction]
-        ex, ey = self._to_screen(self.location[0] + fx * 0.15, self.location[1] + fy * 0.15)
+        ex, ey = sx + fx * 0.15 * self.scale, sy + fy * 0.15 * self.scale
         c.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill=red, outline="")
         c.create_line(sx, sy, ex, ey, fill=red, width=3, arrow="last", arrowshape=(12, 14, 5))
 
     def _on_deck_click(self, event):
+        # Anywhere on the drawing: around the deck is the frame, also a place
+        # to load. Fill the boxes; _on_location_typed then moves the marker.
         x, y = self._to_deck(event.x, event.y)
-        if not (0 <= x <= self.deck_width and 0 <= y <= self.deck_length):
-            return
-        # Fill the boxes; _on_location_typed then moves the marker.
         self.x_var.set(self._show_len(x))
         self.y_var.set(self._show_len(y))
 
@@ -716,21 +715,16 @@ class App(tk.Tk):
         except ValueError:
             self.location_label.config(text="No location chosen: click the deck or type it")
         else:
+            self.location = (x, y)
+            name = self.length_unit.get()
+            text = (f"Load at {self.x_var.get()} {name} right of the left edge, "
+                    f"{self.y_var.get()} {name} back from the front")
+            if self.z_var.get().strip():
+                text += f", {self.z_var.get()} {name} below the deck surface"
             tol = 1e-6
-            if -tol <= x <= self.deck_width + tol and -tol <= y <= self.deck_length + tol:
-                self.location = (x, y)
-                name = self.length_unit.get()
-                text = (f"Load at {self.x_var.get()} {name} right of the left edge, "
-                        f"{self.y_var.get()} {name} back from the front")
-                try:
-                    below = float(self.z_var.get()) != 0
-                except ValueError:
-                    below = True        # shown, so the bad entry gets noticed
-                if below:
-                    text += f", {self.z_var.get()} {name} below the deck (set in Details)"
-                self.location_label.config(text=text)
-            else:
-                self.location_label.config(text="That point is off the deck.")
+            if not (-tol <= x <= self.deck_width + tol and -tol <= y <= self.deck_length + tol):
+                text += "  (off the deck: on the frame)"
+            self.location_label.config(text=text)
         self._redraw_deck()
         self._update_buttons()
 
@@ -760,7 +754,8 @@ class App(tk.Tk):
         fields = {}
         if kind == "load":
             try:
-                force_n, z = self._force_n(), float(self.z_var.get()) * self._unit()
+                force_n, below = self._force_n(), float(self.z_var.get().strip() or 0)
+                z = below * self._unit()
             except ValueError:
                 messagebox.showerror("Capture", "Load and depth below the deck must be numbers.")
                 return
@@ -779,7 +774,7 @@ class App(tk.Tk):
                     return
             entered = {"load": float(self.load_amount.get()), "load_unit": self.load_unit.get(),
                        "right": float(self.x_var.get()), "back": float(self.y_var.get()),
-                       "below": float(self.z_var.get()), "length_unit": self.length_unit.get()}
+                       "below": below, "length_unit": self.length_unit.get()}
             fields = fp.load_trial_entry(self.direction.get(), *self.location, z, force_n, entered)
         elif kind == "loopback":
             fields = {"loopback": self._loopback_settings()}

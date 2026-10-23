@@ -126,13 +126,13 @@ To quit, close the window.
     under, showing its X, Y and Z forces in **newtons**. Forces are measured
     from the latest **Tare**; until you tare, the plots say "NOT TARED".
   - **Below it: the deck size.**
-- **Right: the words and buttons.** At the top, the five things you set for
-  each capture (direction, load, where it is, notes) and the **Tare** and
-  **Log 5 s of data** buttons. Under them, a blue line gives the total down
+- **Right: the words and buttons.** At the top, the things you set for
+  each capture (direction, load, where it is, optional depth below the deck,
+  notes) and the **Tare** and **Log 5 s of data** buttons. Under them, a blue line gives the total down
   force and the **centre of pressure**, which is also drawn on the deck as a
   blue target.
 - **Details** (click to open): the data folder, the list of captures, **Fit**,
-  depth below the deck, the load-cell scale, and the loopback test.
+  the load-cell scale, and the loopback test.
 
 ## First: set the deck size and units
 
@@ -146,15 +146,19 @@ ft only changes what's shown; you can switch any time.
 1. **Take the weight off the deck** and click **Tare (no load)**. The app records 5
    seconds of "nothing on the deck" as the zero point.
 2. **Put a known weight on the deck** (or pull with a known force).
-3. **Say where it is.** Either click on the deck drawing (a red marker appears
-   and the boxes fill in), or type into the two boxes:
+3. **Say where it is.** Either click on the drawing (a red marker appears
+   and the boxes fill in), or type into the boxes:
    - how far **right of the left edge**
    - how far **back from the front edge**
+   - how far **below the deck surface** (optional). Leave it blank for a load on
+     the deck. For a pull on the frame underneath, type how far down it is
+     (e.g. `0.12` m for 12 cm below; always positive).
 
-   If you're pulling on the frame underneath instead of the deck surface, also
-   open **Details → Depth and scale** and type how far **below the deck
-   surface** it is (e.g. `0.12` m for 12 cm below; always positive). Set it
-   back to `0` afterwards. While it isn't 0, the line under the boxes says so.
+   The load doesn't have to be on the deck: the frame counts too. Clicking
+   beside the deck, or typing a point past its edges (a negative number for
+   left of the left edge or in front of the front edge), is fine. The line under
+   the boxes then says "off the deck: on the frame". A point beyond the
+   drawing is marked at its edge.
 4. **Choose the direction** the force pushes the deck:
    - **down**: a weight sitting on the deck
    - **forward / back / left / right**: a sideways pull (for example a rope over a pulley)
