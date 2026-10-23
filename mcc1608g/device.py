@@ -342,12 +342,19 @@ class USB1608G:
             self._dev.clear_halt(P.AI_SCAN_ENDPOINT)
             self._send(Cmd.AIN_CLEAR_FIFO)
 
-            # Slow scans: ship each scan as its own USB packet so data arrives
-            # promptly. Fast scans: fill 512-byte packets for throughput.
+            # Slow scans: pack whole scans into each USB packet, as many as fit
+            # and arrive within ~50 ms, picking a count that divides the scan so
+            # the last packet is full. One scan per packet would mean one USB
+            # read per scan on the host (1000/s for 12 channels at 1 kHz), and a
+            # busy GUI thread could then fall behind and overrun the FIFO.
+            # Fast scans: fill 512-byte packets for throughput.
+            max_samples = self._bulk_max_packet(P.AI_SCAN_ENDPOINT) // 2
             if rate <= 1000:
-                packet_samples = n_chan
+                most = max(1, min(max_samples // n_chan, int(rate * 0.05)))
+                scans = max(k for k in range(1, most + 1) if samples_per_channel % k == 0)
+                packet_samples = scans * n_chan
             else:
-                packet_samples = self._bulk_max_packet(P.AI_SCAN_ENDPOINT) // 2
+                packet_samples = max_samples
             cfg = P.AinScanConfig.pack(samples_per_channel, 0, period,
                                        packet_samples - 1, 0, 0)
             self._send(Cmd.AIN_SCAN_START, data=cfg)
@@ -471,12 +478,14 @@ class AoScan:
         # The device NAKs while its FIFO is full, so this blocks until room appears.
         samples = len(chunk) // 2
         timeout_ms = int(1000 * samples / (self.n_chan * self.rate)) + 2000
-        self._daq._dev.write(P.AO_SCAN_ENDPOINT, chunk, timeout_ms)
-        self._sent += len(chunk)
+        written = self._daq._dev.write(P.AO_SCAN_ENDPOINT, chunk, timeout_ms)
+        if written != len(chunk):
+            raise DaqError(f"AO write sent {written} of {len(chunk)} bytes before timing out.")
+        self._sent += written
 
     def _prefill(self):
-        """Load as much as fits in the 4k-sample FIFO before the pacer starts."""
-        self._write(min(len(self._payload), P.AO_FIFO_SAMPLES * 2))
+        """Load what the FIFO accepts before the pacer starts; the feeder sends the rest."""
+        self._write(min(len(self._payload), P.AO_PREFILL_SAMPLES * 2))
 
     def _start_feeder(self):
         if self._sent >= len(self._payload):

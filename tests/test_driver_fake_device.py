@@ -288,8 +288,14 @@ def test_scan_config_packing(daq):
     assert ai.rate == pytest.approx(10_000)
     ai.stop()
 
+    # Slow mode: whole scans per packet, a count that divides the scan and
+    # arrives within 50 ms.
     daq.a_in_scan(0, 3, AiMode.SINGLE_ENDED, AiRange.BIP10V, 10, 100)
-    assert daq.fake.ai_scan["packet"] == 4           # slow mode: one scan per packet
+    assert daq.fake.ai_scan["packet"] == 5 * 4       # 100 Hz: at most 5 scans
+    daq.a_in_scan(0, 11, AiMode.SINGLE_ENDED, AiRange.BIP10V, 5000, 1000)
+    assert daq.fake.ai_scan["packet"] == 20 * 12     # force-plate capture: 480 bytes
+    daq.a_in_scan(0, 11, AiMode.SINGLE_ENDED, AiRange.BIP10V, 23, 1000)
+    assert daq.fake.ai_scan["packet"] == 12          # prime count: one scan per packet
 
     with pytest.raises(DaqError):
         daq.a_in_scan(0, 1, AiMode.SINGLE_ENDED, AiRange.BIP10V, 10, 400_000)

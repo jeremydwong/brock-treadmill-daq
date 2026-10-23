@@ -97,6 +97,10 @@ CLOCK_HZ = 64_000_000
 
 AI_FIFO_SAMPLES = 8 * 1024
 AO_FIFO_SAMPLES = 4 * 1024
+# How much the DAC FIFO accepts *before* its pacer starts. Measured on a
+# USB-1608GX-2AO (Oct 2026): 4096 bytes go in at once, a larger write stalls
+# at 5120 bytes until it times out.
+AO_PREFILL_SAMPLES = 2 * 1024
 
 # --- Analog input configuration --------------------------------------------
 
