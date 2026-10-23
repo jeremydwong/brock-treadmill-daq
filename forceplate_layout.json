@@ -1,0 +1,29 @@
+{
+  "about": [
+    "Where the four load cells sit under the deck, and how to turn their volts into newtons.",
+    "Positions are measured on the top surface from the deck's FRONT-LEFT corner (seen from above,",
+    "facing forward on the belt): x_m to the right, y_m toward the back, in metres, to the centre",
+    "of each load cell.",
+    "WIRING: load cell N plugs into the amplifier's load-cell input N (M12 connectors 1-4 on the",
+    "Michigan Scientific SGA12), so signals NX, NY, NZ come out on wire bundle N. Plug them in",
+    "exactly as 'where' says below.",
+    "SCALE: newtons_per_volt is per axis, from each load cell's calibration sheet. The amplifier",
+    "has gain 201 and 10 V excitation, so a sheet giving S mV/V at a rated load of F newtons means",
+    "newtons_per_volt = F / (2.01 * S). Flip the sign of Z if pressing down reads negative: the",
+    "GUI wants a load pressing down on the deck to be positive Z.",
+    "Set scale_is_placeholder to false once the real numbers are in."
+  ],
+  "deck": {"width_m": 0.6, "length_m": 1.6},
+  "amplifier": {"model": "Michigan Scientific SGA12", "gain": 201, "excitation_v": 10},
+  "scale_is_placeholder": true,
+  "load_cells": {
+    "1": {"where": "front left",  "x_m": 0.05, "y_m": 0.05,
+          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+    "2": {"where": "front right", "x_m": 0.55, "y_m": 0.05,
+          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+    "3": {"where": "back right",  "x_m": 0.55, "y_m": 1.55,
+          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+    "4": {"where": "back left",   "x_m": 0.05, "y_m": 1.55,
+          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}}
+  }
+}

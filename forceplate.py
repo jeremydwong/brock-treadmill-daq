@@ -26,6 +26,10 @@ Forces are in newtons and moments in newton-metres about the deck frame origin.
 The first three rows alone are the force-only calibration; the moments are
 what let you compute centre of pressure.
 
+Before there is a fit, forceplate_layout.json gives a rough answer: where each
+cell sits and its newtons per volt from its calibration sheet. That is enough
+to show each cell's force and a centre of pressure from the four Z forces.
+
 Deck frame (seen from above, standing on the belt facing forward; right-handed,
 the same convention as AMTI and Bertec force plates):
   origin  front-left corner of the deck, on its top surface
@@ -386,6 +390,61 @@ def centre_of_pressure(load: np.ndarray) -> tuple[float, float]:
     """(x, y) on the deck surface where a pure force would give these moments."""
     fz, mx, my = load[2], load[3], load[4]
     return -my / fz, mx / fz
+
+
+# ---------------------------------------------------------------------------
+# Load-cell layout: positions and per-channel scale, before any fit
+# ---------------------------------------------------------------------------
+
+LAYOUT_FILE = Path(__file__).with_name("forceplate_layout.json")
+
+
+@dataclass
+class Layout:
+    deck_length_m: float
+    deck_width_m: float
+    where: dict[str, str]           # cell "1".."4" -> "front left", ...
+    positions: np.ndarray           # (4, 2) x, y in metres, cells 1..4
+    newtons_per_volt: np.ndarray    # (12,) in SIGNAL_NAMES order
+    placeholder: bool               # True until the calibration-sheet numbers are in
+    path: Path
+
+
+def load_layout(path: Path = LAYOUT_FILE) -> Layout:
+    """Read forceplate_layout.json (see the "about" lines in it)."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    cells = raw["load_cells"]
+    ids = ["1", "2", "3", "4"]
+    return Layout(
+        deck_length_m=float(raw["deck"]["length_m"]),
+        deck_width_m=float(raw["deck"]["width_m"]),
+        where={c: cells[c]["where"] for c in ids},
+        positions=np.array([[cells[c]["x_m"], cells[c]["y_m"]] for c in ids], dtype=float),
+        newtons_per_volt=np.array([cells[s[0]]["newtons_per_volt"][s[1]] for s in SIGNAL_NAMES],
+                                  dtype=float),
+        placeholder=bool(raw.get("scale_is_placeholder", False)),
+        path=Path(path),
+    )
+
+
+def cell_forces(volts: np.ndarray, zero: np.ndarray | None, layout: Layout) -> np.ndarray:
+    """Volts (..., 12) -> newtons (..., 12), each cell in its own axes. No zero: untared."""
+    return (volts - (0.0 if zero is None else zero)) * layout.newtons_per_volt
+
+
+def cop_from_cells(forces: np.ndarray, layout: Layout,
+                   min_n: float = 20.0) -> tuple[float, float, float] | None:
+    """
+    Centre of pressure from geometry alone: the four vertical (Z) forces, (12,)
+    newtons, weighted by where the cells sit. Returns (x, y, total Fz), or None
+    when the total is under `min_n` and the ratio would only be noise.
+    """
+    fz = forces[[SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]]
+    total = fz.sum()
+    if abs(total) < min_n:
+        return None
+    x, y = fz @ layout.positions / total
+    return float(x), float(y), float(total)
 
 
 def report(fit: Fit):

@@ -36,4 +36,4 @@ build-backend = "hatchling.build"
 packages = ["mcc1608g"]
 include = ["loopback_test.py", "sinusoid_loopback.py", "sinusoid_scan.py", "compare_uldaq.py",
            "forceplate.py", "forceplate_gui.py", "tk_env.py",
-           "loopback_live.py", "capture_check.py"]
+           "loopback_live.py", "capture_check.py", "forceplate_layout.json"]

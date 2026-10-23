@@ -101,7 +101,7 @@ cd ~/Documents/brock-treadmill-daq
 uv run forceplate_gui.py
 ```
 
-A window opens. The grey status line under the **Capture** buttons should say
+A window opens. The status line under the **Tare** and **Log** buttons should say
 `Connected to USB-1608GX-2AO ...`. The first time after the DAQ is powered up, this takes
 about a second while the app loads the DAQ's firmware.
 
@@ -115,18 +115,28 @@ To quit, close the window.
 
 ## What you're looking at
 
-- **Left: the deck, seen from above.** The front of the treadmill is at the top.
-  The rulers measure from the **top-left corner**, which is the front-left
-  corner of the deck: across the top is "right of the left edge", down the
-  side is "back from the front edge". The numbered dark circles are the four
-  load cells.
-- **Right: the controls.**
-- **Middle: the signals.** One plot per load cell, with its X, Y and Z channels.
-- **Bottom: the data folder**, where everything is saved.
+- **Left: the pictures.**
+  - **Centre: the deck, seen from above.** The front of the treadmill is at the top.
+    The rulers measure from the **top-left corner**, which is the front-left
+    corner of the deck: across the top is "right of the left edge", down the
+    side is "back from the front edge". The numbered dark circles are the four
+    load cells, where `forceplate_layout.json` says they are (see
+    [Load-cell layout](#load-cell-layout-and-wiring)).
+  - **Around it: one plot per load cell**, beside the corner that cell sits
+    under, showing its X, Y and Z forces in **newtons**. Forces are measured
+    from the latest **Tare**; until you tare, the plots say "NOT TARED".
+  - **Below it: the deck size.**
+- **Right: the words and buttons.** At the top, the five things you set for
+  each capture (direction, load, where it is, notes) and the **Tare** and
+  **Log 5 s of data** buttons. Under them, a blue line gives the total down
+  force and the **centre of pressure**, which is also drawn on the deck as a
+  blue target.
+- **Details** (click to open): the data folder, the list of captures, **Fit**,
+  depth below the deck, the load-cell scale, and the loopback test.
 
 ## First: set the deck size and units
 
-Above the deck drawing, pick **m** or **ft**, type the deck's **side to side**
+Below the deck drawing, pick **m** or **ft**, type the deck's **side to side**
 and **front to back** size, and click **Set size**. Do this before you capture
 anything; a session's deck size can't be changed later. Switching between m and
 ft only changes what's shown; you can switch any time.
@@ -137,12 +147,14 @@ ft only changes what's shown; you can switch any time.
    seconds of "nothing on the deck" as the zero point.
 2. **Put a known weight on the deck** (or pull with a known force).
 3. **Say where it is.** Either click on the deck drawing (a red marker appears
-   and the boxes fill in), or type into the three boxes:
+   and the boxes fill in), or type into the two boxes:
    - how far **right of the left edge**
    - how far **back from the front edge**
-   - how far **below the deck surface**: `0` if the force is on the deck
-     surface; if you're pulling on the frame underneath, how far down (e.g.
-     `0.12` m for 12 cm below). Always a positive number.
+
+   If you're pulling on the frame underneath instead of the deck surface, also
+   open **Details → Depth and scale** and type how far **below the deck
+   surface** it is (e.g. `0.12` m for 12 cm below; always positive). Set it
+   back to `0` afterwards. While it isn't 0, the line under the boxes says so.
 4. **Choose the direction** the force pushes the deck:
    - **down**: a weight sitting on the deck
    - **forward / back / left / right**: a sideways pull (for example a rope over a pulley)
@@ -152,7 +164,7 @@ ft only changes what's shown; you can switch any time.
    next to it.
 6. **Notes** (optional): anything worth remembering, e.g. "2 × 10 kg plates,
    belt off". Notes are saved with every capture until you change them.
-7. Click **Capture load** and **keep everything still** for 5 seconds.
+7. Click **Log 5 s of data** and **keep everything still** for 5 seconds.
 8. Repeat steps 2–7 with weights in many different places and in all five
    directions. Grey dots on the drawing show where you've already measured.
    Re-tare (step 1) every so often. Each capture uses the most recent tare.
@@ -160,15 +172,20 @@ ft only changes what's shown; you can switch any time.
 You need **at least 12** load captures, and more is better, spread over the whole
 deck and all directions.
 
-**Live view** (tick box) shows the signals continuously, which helps you
+**Live view** (tick box) shows the forces continuously, which helps you
 check that everything is plugged in and that the weight has stopped swinging.
+After a tare it also moves the blue centre-of-pressure target as the load
+moves. It is worked out only from the four Z forces and where the cells sit,
+before any calibration, so it's a sanity check: a weight placed on the deck
+should land close to its red marker.
 
-**Made a mistake?** Click the capture in the **Session** list and click
-**Remove selected**.
+**Made a mistake?** Open **Details**, click the capture in the **Session** list
+and click **Remove selected**. Clicking a capture in the list also shows its
+plots and its average centre of pressure.
 
 ## Getting the calibration
 
-Click **Fit**. A window shows the calibration matrix and how well it matches
+Open **Details** and click **Fit**. A window shows the calibration matrix and how well it matches
 each capture. It also saves the result in the session folder. You can also
 run the fit later from the terminal:
 ```
@@ -177,7 +194,7 @@ uv run forceplate.py "<session folder>"
 
 ## Where your data goes
 
-Everything is saved in the **data folder** shown at the bottom of the window.
+Everything is saved in the **data folder** shown under **Details → Session**.
 By default that's **`ForcePlate data` inside your Documents folder**. Click
 **Change...** to pick another folder (the app remembers it next time) and
 **Open** to see the files.
@@ -226,7 +243,7 @@ see it appear in the app.
 2. Using the screw-terminal board, connect a wire from **AOUT0** (pin 13) or
    **AOUT1** (pin 15) to the input you want to test (e.g. **CH0H**), and a
    second wire from **AGND** (pin 14) to an **AGND** terminal.
-3. In the app, tick **Loopback mode**.
+3. In the app, open **Details → Loopback test** and tick **Loopback mode**.
 4. Choose which output you're driving (**drive**) and which input it's wired to
    (**wired to**). That input's trace is drawn thicker.
 5. Choose **fixed** (a steady voltage) or **sine** (a wave). Set the voltage, plus
@@ -234,10 +251,42 @@ see it appear in the app.
 6. Tick **Live view**. You should see the voltage on the input you chose.
 7. Click **Outputs off** when you're done, and reconnect the load-cell wire.
 
-While loopback mode is on, the **Capture** button saves loopback captures.
+While loopback mode is on, the plots show volts and the **Log** button saves loopback captures.
 These are kept, but the calibration fit ignores them.
 
 ---
+
+# Load-cell layout and wiring
+
+`forceplate_layout.json` (in this folder) says where each load cell is and how
+to turn its volts into newtons. Edit it in any text editor.
+
+**Plug-in order.** Load cell *N* goes into the amplifier's load-cell input *N*
+(the four M12 connectors on the Michigan Scientific SGA12), so its signals come
+out on wire bundle *N* as NX, NY, NZ:
+
+| Load cell / amplifier input | Where it sits under the deck |
+|---|---|
+| 1 | front left |
+| 2 | front right |
+| 3 | back right |
+| 4 | back left |
+
+(Seen from above, standing on the belt facing forward: clockwise from the front left.)
+
+**Positions.** For each cell, `x_m` is how far its centre is **right of the
+left edge** and `y_m` how far **back from the front edge**, in metres, measured
+from the deck's front-left corner. The deck size there is the app's default.
+
+**Scale.** `newtons_per_volt` is per axis and comes from each load cell's
+calibration sheet. The amplifier has gain 201 and 10 V excitation, so if a sheet
+says *S* mV/V at a rated load of *F* newtons:
+```
+newtons_per_volt = F / (2.01 × S)
+```
+A load pressing down should read as positive Z; if it reads negative, make that
+cell's Z number negative. The numbers in the file now are **placeholders**, and
+the line under the **Log** button says "placeholder scale" until you set `"scale_is_placeholder": false`.
 
 # Wiring reference
 

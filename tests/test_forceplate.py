@@ -7,6 +7,7 @@ Run:  uv run --with pytest pytest -q
 """
 
 import csv
+import sys
 import json
 import time
 from types import SimpleNamespace
@@ -149,6 +150,37 @@ def test_loads_without_tare_are_skipped(tmp_path):
     assert ids == []
 
 
+def test_layout_file_matches_channel_order():
+    layout = fp.load_layout()
+    assert layout.positions.shape == (4, 2) and layout.newtons_per_volt.shape == (12,)
+    # Every cell sits on the deck it describes.
+    assert (layout.positions >= 0).all()
+    assert (layout.positions[:, 0] <= layout.deck_width_m).all()
+    assert (layout.positions[:, 1] <= layout.deck_length_m).all()
+
+
+def test_cop_from_cell_geometry():
+    layout = fp.load_layout()
+    zero = np.full(12, 0.3)
+    z = [fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]
+    # Equal volts on all four Z channels: the middle of the four cells.
+    volts = zero.copy()
+    volts[z] += 0.1
+    x, y, total = fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)
+    assert (x, y) == pytest.approx(layout.positions.mean(axis=0))
+    assert total == pytest.approx(0.1 * layout.newtons_per_volt[z].sum())
+    # All of it on cell 3: right on top of cell 3.
+    volts = zero.copy()
+    volts[z[2]] += 0.2
+    x, y, _ = fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)
+    assert (x, y) == pytest.approx(layout.positions[2])
+    # X and Y forces don't move it, and too little load gives no answer.
+    volts[[0, 1, 9, 10]] += 1.0
+    assert fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)[:2] \
+        == pytest.approx(layout.positions[2])
+    assert fp.cop_from_cells(np.zeros(12), layout) is None
+
+
 def test_remove_trial_keeps_csv(tmp_path):
     session = fp.Session.create(tmp_path / "s", 1.6, 0.6)
     session.add_trial(np.zeros((10, 12)), 1000.0, "tare")
@@ -181,7 +213,7 @@ def app(monkeypatch, tmp_path):
     try:
         window = gui.App(USB1608G(fake))
     except tk.TclError:
-        pytest.skip("no display")
+        pytest.skip(f"no display: {sys.exc_info()[1]}")
     window.withdraw()
     yield window
     window._on_close()
@@ -276,8 +308,33 @@ def test_gui_live_view_fills_buffer(app):
     app.live.set(True)
     app._on_live_toggle()
     pump(app, lambda: not np.isnan(app.live_buffer[-1]).any())
+    assert "tare first" in app.cop_label.cget("text")     # no tare yet: no COP
+    assert "NOT TARED" in app.showing_label.cget("text")
     app.live.set(False)
     app._on_live_toggle()
+
+
+def test_gui_cop_from_live_volts(app):
+    capture(app, "tare")                                   # fake reads 0 V everywhere
+    assert app.zero_v is not None and app.cop is None
+    volts = np.zeros(12)
+    volts[[fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]] = [0.1, 0.1, 0.3, 0.3]
+    app._show_cop(volts, app.zero_v, "Live")
+    pos = app.layout.positions
+    expected = (pos * np.array([[0.1], [0.1], [0.3], [0.3]])).sum(axis=0) / 0.8
+    assert app.cop == pytest.approx(tuple(expected))
+    assert app.canvas.find_withtag("cop")                  # drawn on the deck
+    app._redraw_deck()
+    assert app.canvas.find_withtag("cop")                  # and survives a redraw
+
+
+def test_gui_cell_plots_sit_at_their_corners(app):
+    # Cell 1 is front left: top-left of the grid; cell 3 back right: bottom-right.
+    info = [c.get_tk_widget().grid_info() for c in app.plot_canvases]
+    assert (int(info[0]["row"]), int(info[0]["column"])) == (0, 0)
+    assert (int(info[1]["row"]), int(info[1]["column"])) == (0, 2)
+    assert (int(info[2]["row"]), int(info[2]["column"])) == (1, 2)
+    assert (int(info[3]["row"]), int(info[3]["column"])) == (1, 0)
 
 
 def test_gui_deck_size(app, monkeypatch):

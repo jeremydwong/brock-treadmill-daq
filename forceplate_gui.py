@@ -2,12 +2,21 @@
 """
 Force-plate calibration GUI.
 
-Click on the deck (top view) where the load is applied, or type how far it is
-right of the left edge, back from the front edge and below the deck; pick its
-direction, enter the mass or force, and press Capture. Each capture records all
-12 load-cell channels for 5 s at 1 kHz into a CSV, and its location, direction,
-load and notes go into session.json and captures_log.csv (see forceplate.py for
-the file layout and the fit).
+Left: the deck from above, with each load cell's X/Y/Z force plotted beside
+the corner it sits under, and the deck size below. Right: the few things set
+for every capture, the Tare and Log buttons, and a Details section for the
+rest (data folder, session list, fit, depth below the deck, loopback test).
+
+Click on the deck where the load is applied, or type how far it is right of
+the left edge and back from the front edge; pick its direction, enter the mass
+or force, and press "Log 5 s of data". Each capture records all 12 load-cell
+channels for 5 s at 1 kHz into a CSV, and its location, direction, load and
+notes go into session.json and captures_log.csv (see forceplate.py for the
+file layout and the fit).
+
+Load-cell positions and newtons per volt come from forceplate_layout.json.
+Forces are tared with the latest Tare; with one, the deck also shows the
+centre of pressure worked out from the four Z forces.
 
 Sessions are saved under the data folder shown in the window (by default
 Documents/ForcePlate data); "Change..." picks another and it is remembered.
@@ -15,7 +24,7 @@ Documents/ForcePlate data); "Change..." picks another and it is remembered.
 Workflow for one session:
   1. Deck unloaded -> "Tare (no load)".
   2. Put a known mass on (or pull with a known force) -> click or type its
-     location, pick the direction -> "Capture load".
+     location, pick the direction -> "Log 5 s of data".
   3. Repeat 2 at many locations and in every direction; re-tare now and then.
      Each load is paired with the latest tare.
   4. "Fit" (or `uv run forceplate.py <session>`) solves for the matrix.
@@ -29,6 +38,7 @@ Usage:
   uv run forceplate_gui.py                                # new session in the data folder
   uv run forceplate_gui.py --session "<data folder>/2026..."   # keep adding to one
   uv run forceplate_gui.py --length 1.8 --width 0.7       # deck size in metres
+                                                          # (default: forceplate_layout.json)
 
 Coordinates are in the deck frame of forceplate.py: origin at the front-left
 corner (top left of the drawing), +x right, +y back, +z down (below the deck).
@@ -60,12 +70,8 @@ from matplotlib.figure import Figure
 import forceplate as fp
 from mcc1608g import USB1608G, AiMode, AiRange, DaqError
 
-# --- Deck (edit to match the treadmill, pass --length/--width, or set in the GUI) ---
-DECK_LENGTH_M = 1.6       # front to back, along +y
-DECK_WIDTH_M = 0.6        # left to right, along +x
-# Which corner each load cell sits under. Only used for the drawing.
-CELL_CORNERS = {"1": ("front", "left"), "2": ("front", "right"),
-                "3": ("back", "right"), "4": ("back", "left")}
+# Deck size and load-cell positions: forceplate_layout.json (or --length/--width,
+# or set in the GUI).
 
 AI_MODE = AiMode.SINGLE_ENDED
 AI_RANGE = AiRange.BIP10V
@@ -76,12 +82,17 @@ MIN_FREE_MB = 50          # refuse to capture with less disk space than this (a 
 
 MONITOR_BLOCK = 100       # samples per live-view scan (0.1 s at 1 kHz)
 MONITOR_WINDOW_S = 3.0    # seconds of history in the live view
+LIVE_REDRAW_S = 0.25      # redraw the four live plots at most this often (each takes ~25 ms)
+LIVE_POINTS = 600         # points per line in the live plots: about 2 per pixel
 AO_RATE = 1000.0          # DAC updates per second for the loopback sine
 AO_SINE_SECONDS = 30 * 60 # a sine runs this long, then the output holds
 
 AXIS_COLORS = {"X": "#3366cc", "Y": "#dd8800", "Z": "#33aa55"}
 MONO = "TkFixedFont"      # the platform's monospace font (Menlo, Consolas, ...)
 DECK_PX = 520             # longest side of the deck drawing, on a tall enough screen
+CELL_PLOT_PX = 290        # width of each load cell's plot beside the deck
+PLOT_DPI = 90
+COP_COLOR = "#1f6fd1"
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +159,10 @@ class DaqWorker(threading.Thread):
             self.daq.a_out(0, 0.0)
             self.daq.a_out(1, 0.0)
 
-    def _do_ao_off(self):
+    def _do_ao_off(self, quiet: bool = False):
         self._stop_ao()
-        self.results.put(("status", "Analog outputs off (0 V)."))
+        if not quiet:
+            self.results.put(("status", "Analog outputs off (0 V)."))
 
     def _do_ao_dc(self, channel: int, volts: float):
         self._stop_ao()
@@ -180,17 +192,25 @@ class DaqWorker(threading.Thread):
 class App(tk.Tk):
     def __init__(self, daq: USB1608G | None, daq_error: str = "",
                  session_dir: Path | None = None,
-                 deck_length: float = DECK_LENGTH_M, deck_width: float = DECK_WIDTH_M):
+                 deck_length: float | None = None, deck_width: float | None = None,
+                 layout: fp.Layout | None = None):
         super().__init__()
         self.title("Force-plate calibration")
-        self.deck_length = deck_length      # metres, front to back (y)
-        self.deck_width = deck_width        # metres, side to side (x)
+        self.layout = layout or fp.load_layout()
+        self.deck_length = deck_length or self.layout.deck_length_m   # metres, front to back (y)
+        self.deck_width = deck_width or self.layout.deck_width_m      # metres, side to side (x)
         self.settings = load_settings()
         self.data_dir = Path(self.settings.get("data_dir", DEFAULT_DATA_DIR))
         self.session: fp.Session | None = fp.Session.load(session_dir) if session_dir else None
+        # Mean volts of the latest tare: the zero for forces and centre of pressure.
+        self.zero_v: np.ndarray | None = None
         if self.session:
             deck = self.session.meta["deck"]
             self.deck_length, self.deck_width = deck["length_m"], deck["width_m"]
+            tare = self.session.last_tare_id()
+            if tare is not None:
+                self.zero_v = self._trial_mean_v(tare)
+        self.cop: tuple[float, float] | None = None     # (x, y) metres, drawn on the deck
 
         self.daq = daq
         self.worker: DaqWorker | None = None
@@ -202,16 +222,17 @@ class App(tk.Tk):
         self.busy = False
         n_window = int(MONITOR_WINDOW_S * fp.SAMPLE_RATE)
         self.live_buffer = np.full((n_window, 12), np.nan)
+        self._last_live_draw = dt.datetime.min
 
-        # Fit small laptop screens: shrink the deck drawing, and let the plot
-        # (the only stretchy row) give up the rest.
-        self.deck_px = max(280, min(DECK_PX, self.winfo_screenheight() - 420))
-        self._build_deck()
+        # Fit small laptop screens: the deck drawing sets the height of the window.
+        self.deck_px = max(280, min(DECK_PX, self.winfo_screenheight() - 300))
+        self._build_visuals()
         self._build_controls()
-        self._build_plot()
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
         self._refresh_trials()
         self._redraw_deck()
-        self._on_loopback_toggle()
+        self._on_loopback_toggle(quiet=True)    # outputs to 0 V, keeping "Connected" in view
 
         if daq is None:
             self._set_status(f"No DAQ: {daq_error}  (capture disabled)")
@@ -225,13 +246,25 @@ class App(tk.Tk):
         if self.winfo_reqheight() > max_h:
             self.geometry(f"{self.winfo_reqwidth()}x{max_h}+0+0")
 
-    # -- layout ---------------------------------------------------------------
-    def _build_deck(self):
-        frame = ttk.LabelFrame(self, text="Deck, top view: click where the load is applied")
+    # -- layout: everything visual on the left -------------------------------
+    def _build_visuals(self):
+        frame = ttk.LabelFrame(self, text="Deck from above, front at the top: "
+                                          "click where the load is applied")
         frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        grid = ttk.Frame(frame)
+        grid.pack(padx=4, pady=4)
 
+        # Room around the deck for the rulers (top, left) and labels.
+        self.margin_left, self.margin_top, self.margin_right, self.margin_bottom = 80, 56, 24, 30
+        self.canvas = tk.Canvas(grid, background="white", highlightthickness=0)
+        self.canvas.grid(row=0, column=1, rowspan=2)
+        self.canvas.bind("<Button-1>", self._on_deck_click)
+        self._resize_canvas()
+        self._build_cell_plots(grid, int(float(self.canvas.cget("height")) / 2))
+
+        # Deck size, below the drawing
         dims = ttk.Frame(frame)
-        dims.pack(fill="x", padx=6, pady=(4, 0))
+        dims.pack(padx=6, pady=(0, 6))
         ttk.Label(dims, text="Deck size:").pack(side="left")
         self.width_var = tk.StringVar()
         self.length_var = tk.StringVar()
@@ -249,14 +282,31 @@ class App(tk.Tk):
         ttk.Button(dims, text="Set size", command=self._set_deck_size).pack(side="left", padx=4)
         self._show_deck_size()
 
-        # Room around the deck for the rulers (top, left) and labels.
-        self.margin_left, self.margin_top, self.margin_right, self.margin_bottom = 80, 56, 24, 30
-        self.canvas = tk.Canvas(frame, background="white", highlightthickness=0)
-        self.canvas.pack(padx=4, pady=4)
-        self.canvas.bind("<Button-1>", self._on_deck_click)
-        self._resize_canvas()
-        self.location_label = ttk.Label(frame, text="No location chosen")
-        self.location_label.pack(pady=(0, 4))
+    def _build_cell_plots(self, grid: ttk.Frame, height_px: int):
+        """One small plot per load cell, beside the deck corner the cell sits under."""
+        free = [(0, 0), (0, 2), (1, 2), (1, 0)]
+        self.axes, self.lines, self.plot_canvases = [], [], []
+        for i, cell in enumerate("1234"):
+            x, y = self.layout.positions[i]
+            want = (0 if y < self.deck_length / 2 else 1, 0 if x < self.deck_width / 2 else 2)
+            slot = want if want in free else free[0]     # two cells in one corner: next free
+            free.remove(slot)
+            fig = Figure(figsize=(CELL_PLOT_PX / PLOT_DPI, height_px / PLOT_DPI), dpi=PLOT_DPI)
+            ax = fig.add_subplot()
+            ax.set_title(f"load cell {cell}: {self.layout.where[cell]}", fontsize=9)
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=7)
+            ax.set_xlabel("s", fontsize=8)
+            for axis in "XYZ":
+                (line,) = ax.plot([], [], color=AXIS_COLORS[axis], linewidth=0.9,
+                                  label=f"{cell}{axis}")
+                self.lines.append(line)         # SIGNAL_NAMES order: 1X 1Y 1Z 2X ...
+            ax.legend(loc="upper left", fontsize=7, ncol=3)
+            fig.tight_layout()
+            canvas = FigureCanvasTkAgg(fig, master=grid)
+            canvas.get_tk_widget().grid(row=slot[0], column=slot[1], padx=4, pady=2)
+            self.axes.append(ax)
+            self.plot_canvases.append(canvas)
 
     def _resize_canvas(self):
         self.scale = self.deck_px / max(self.deck_length, self.deck_width)   # px per metre
@@ -349,88 +399,117 @@ class App(tk.Tk):
         self._redraw_deck()
         self._update_buttons()
 
+    # -- layout: text and controls on the right ---------------------------------
     def _build_controls(self):
         side = ttk.Frame(self)
         side.grid(row=0, column=1, sticky="nsew", padx=(0, 8), pady=8)
 
-        # Applied load
-        load = ttk.LabelFrame(side, text="Applied load")
-        load.pack(fill="x", pady=(0, 6))
+        # The five things set for every capture
+        main = ttk.LabelFrame(side, text="Each capture")
+        main.pack(fill="x", pady=(0, 6))
+        form = ttk.Frame(main)
+        form.pack(fill="x", padx=6, pady=4)
+
+        ttk.Label(form, text="direction").grid(row=0, column=0, sticky="w")
         self.direction = tk.StringVar(value="down")
-        dirs = ttk.Frame(load)
-        dirs.pack(fill="x", padx=6, pady=4)
+        dirs = ttk.Frame(form)
+        dirs.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
         for i, name in enumerate(fp.DIRECTIONS):
             ttk.Radiobutton(dirs, text=name, value=name, variable=self.direction,
-                            command=self._redraw_deck).grid(row=0, column=i, padx=2)
-        row = ttk.Frame(load)
-        row.pack(fill="x", padx=6, pady=(0, 4))
-        ttk.Label(row, text="load").pack(side="left")
+                            command=self._redraw_deck).grid(row=0, column=i, padx=(0, 4))
+
+        ttk.Label(form, text="load").grid(row=1, column=0, sticky="w")
         self.load_amount = tk.StringVar(value="20.0")
-        ttk.Entry(row, textvariable=self.load_amount, width=8).pack(side="left", padx=4)
+        ttk.Entry(form, textvariable=self.load_amount, width=8).grid(row=1, column=1, pady=2)
         self.load_unit = tk.StringVar(value=self.settings.get("load_unit", "kg"))
         if self.load_unit.get() not in fp.FORCE_UNITS:
             self.load_unit.set("kg")
-        w = ttk.Combobox(row, textvariable=self.load_unit, width=4, state="readonly",
+        w = ttk.Combobox(form, textvariable=self.load_unit, width=4, state="readonly",
                          values=list(fp.FORCE_UNITS))
-        w.pack(side="left")
+        w.grid(row=1, column=2, padx=(2, 4), sticky="w")
         w.bind("<<ComboboxSelected>>",
                lambda _e: self._save_settings(load_unit=self.load_unit.get()))
-        self.force_label = ttk.Label(row, text="")
-        self.force_label.pack(side="left", padx=8)
-        ttk.Label(load, text="kg / lb = a mass hung or stacked (weight is worked out); "
-                             "N / lbf = a measured force", foreground="#666"
-                  ).pack(anchor="w", padx=6)
+        self.force_label = ttk.Label(form, text="")
+        self.force_label.grid(row=1, column=3, sticky="w")
         self.load_amount.trace_add("write", lambda *_: self._update_force_label())
         self.load_unit.trace_add("write", lambda *_: self._update_force_label())
-        self._update_force_label()
 
-        # Where: click the deck, or type it
-        where = ttk.Frame(load)
-        where.pack(fill="x", padx=6, pady=(6, 6))
+        # Where: click the deck, or type it. Depth below the deck is in Details.
         self.x_var, self.y_var, self.z_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="0")
         self.unit_labels = []
-        for r, (text, var) in enumerate((("right of the left edge", self.x_var),
-                                         ("back from the front edge", self.y_var),
-                                         ("below the deck surface", self.z_var))):
-            ttk.Entry(where, textvariable=var, width=8).grid(row=r, column=0, pady=1)
-            unit = ttk.Label(where, text=self.length_unit.get(), width=3)
-            unit.grid(row=r, column=1, padx=(2, 4))
+        for r, (text, var) in enumerate((("right of left edge", self.x_var),
+                                         ("back from front edge", self.y_var)), start=2):
+            ttk.Label(form, text=text).grid(row=r, column=0, sticky="w", padx=(0, 6))
+            ttk.Entry(form, textvariable=var, width=8).grid(row=r, column=1, pady=2)
+            unit = ttk.Label(form, text=self.length_unit.get())
+            unit.grid(row=r, column=2, padx=(2, 4), sticky="w")
             self.unit_labels.append(unit)
-            ttk.Label(where, text=text).grid(row=r, column=2, sticky="w")
         self._last_unit = self._unit()
-        self.x_var.trace_add("write", lambda *_: self._on_location_typed())
-        self.y_var.trace_add("write", lambda *_: self._on_location_typed())
 
-        # Capture
-        cap = ttk.LabelFrame(side, text=f"Capture ({fp.CAPTURE_SECONDS:g} s at "
-                                        f"{fp.SAMPLE_RATE:g} Hz, 12 channels)")
-        cap.pack(fill="x", pady=(0, 6))
-        buttons = ttk.Frame(cap)
-        buttons.pack(fill="x", padx=6, pady=4)
+        ttk.Label(form, text="notes").grid(row=4, column=0, sticky="w")
+        self.notes = tk.StringVar()
+        ttk.Entry(form, textvariable=self.notes).grid(row=4, column=1, columnspan=3,
+                                                      sticky="ew", pady=2)
+        form.columnconfigure(3, weight=1)
+        self.location_label = ttk.Label(main, text="", foreground="#444", wraplength=400)
+        self.location_label.pack(anchor="w", padx=6)
+
+        buttons = ttk.Frame(main)
+        buttons.pack(fill="x", padx=6, pady=6)
         self.tare_button = ttk.Button(buttons, text="Tare (no load)",
                                       command=lambda: self._capture("tare"))
         self.tare_button.pack(side="left")
-        self.capture_button = ttk.Button(buttons, text="Capture load",
+        self.capture_button = ttk.Button(buttons, text=self._log_text(),
                                          command=lambda: self._capture("load"))
         self.capture_button.pack(side="left", padx=6)
         self.live = tk.BooleanVar(value=False)
         self.live_check = ttk.Checkbutton(buttons, text="Live view", variable=self.live,
                                           command=self._on_live_toggle)
         self.live_check.pack(side="right")
-        row = ttk.Frame(cap)
-        row.pack(fill="x", padx=6, pady=(0, 4))
-        ttk.Label(row, text="notes").pack(side="left")
-        self.notes = tk.StringVar()
-        ttk.Entry(row, textvariable=self.notes).pack(side="left", fill="x", expand=True, padx=4)
-        self.progress = ttk.Progressbar(cap, mode="determinate", maximum=100)
+        self.progress = ttk.Progressbar(main, mode="determinate", maximum=100)
         self.progress.pack(fill="x", padx=6, pady=(0, 4))
-        self.status = ttk.Label(cap, text="", wraplength=380, justify="left")
-        self.status.pack(fill="x", padx=6, pady=(0, 6))
+        self.status = ttk.Label(main, text="", wraplength=400, justify="left")
+        self.status.pack(fill="x", padx=6, pady=(0, 4))
+        self.showing_label = ttk.Label(main, text="", foreground="#444", wraplength=400)
+        self.showing_label.pack(anchor="w", padx=6)
+        self.cop_label = ttk.Label(main, text="", foreground=COP_COLOR, wraplength=400)
+        self.cop_label.pack(anchor="w", padx=6, pady=(0, 6))
 
-        tabs = ttk.Notebook(side)
-        tabs.pack(fill="both", expand=True)
+        # Everything else, folded away
+        self.details_open = bool(self.settings.get("details_open", False))
+        self.details_button = ttk.Button(side, command=self._toggle_details)
+        self.details_button.pack(anchor="w")
+        self.details = ttk.Notebook(side)
+        self._build_session_tab(self.details)
+        self._build_more_tab(self.details)
+        self._build_loopback_tab(self.details)
+        self._show_details()
 
-        # Session, and where it is saved
+        self.x_var.trace_add("write", lambda *_: self._on_location_typed())
+        self.y_var.trace_add("write", lambda *_: self._on_location_typed())
+        self.z_var.trace_add("write", lambda *_: self._on_location_typed())
+        self._update_force_label()
+
+    @staticmethod
+    def _log_text(loopback: bool = False) -> str:
+        what = " (loopback)" if loopback else ""
+        return f"Log {fp.CAPTURE_SECONDS:g} s of data{what}"
+
+    def _toggle_details(self):
+        self.details_open = not self.details_open
+        self._save_settings(details_open=self.details_open)
+        self._show_details()
+
+    def _show_details(self):
+        if self.details_open:
+            self.details_button.config(text="▾ Details")
+            self.details.pack(fill="both", expand=True, pady=(4, 0))
+        else:
+            self.details_button.config(text="▸ Details: data folder, session list, fit, "
+                                            "depth, scale, loopback")
+            self.details.pack_forget()
+
+    def _build_session_tab(self, tabs: ttk.Notebook):
         sess = ttk.Frame(tabs)
         tabs.add(sess, text="Session")
         data = ttk.Frame(sess)
@@ -451,14 +530,43 @@ class App(tk.Tk):
         ttk.Button(row, text="Remove selected", command=self._remove_trial).pack(side="left", padx=6)
         ttk.Button(row, text="Fit", command=self._fit).pack(side="right")
 
-        # Loopback
+    def _build_more_tab(self, tabs: ttk.Notebook):
+        more = ttk.Frame(tabs)
+        tabs.add(more, text="Depth and scale")
+        row = ttk.Frame(more)
+        row.pack(fill="x", padx=6, pady=6)
+        ttk.Entry(row, textvariable=self.z_var, width=8).pack(side="left")
+        unit = ttk.Label(row, text=self.length_unit.get())
+        unit.pack(side="left", padx=(2, 4))
+        self.unit_labels.append(unit)
+        ttk.Label(row, text="below the deck surface").pack(side="left")
+        ttk.Label(more, text="0 for a load on the deck. For a pull on the frame underneath, "
+                             "how far below the surface (always positive).",
+                  wraplength=400, foreground="#666").pack(anchor="w", padx=6)
+
+        lay = self.layout
+        lines = [f"Load-cell positions and force scale: {lay.path.name}"]
+        for i, cell in enumerate("1234"):
+            x, y = lay.positions[i]
+            npv = lay.newtons_per_volt[3 * i:3 * i + 3]
+            lines.append(f"  cell {cell} ({lay.where[cell]}) on amplifier input {cell}: "
+                         f"{x:g} m right, {y:g} m back; "
+                         + ", ".join(f"{a} {v:g}" for a, v in zip("XYZ", npv)) + " N/V")
+        if lay.placeholder:
+            lines.append("The N/V numbers are PLACEHOLDERS: copy each load cell's calibration "
+                         "sheet into that file (instructions inside) to get real newtons.")
+        ttk.Label(more, text="\n".join(lines), wraplength=400, justify="left"
+                  ).pack(anchor="w", padx=6, pady=(10, 6))
+
+    def _build_loopback_tab(self, tabs: ttk.Notebook):
         loop = ttk.Frame(tabs)
         tabs.add(loop, text="Loopback test")
         self.loopback = tk.BooleanVar(value=False)
-        ttk.Checkbutton(loop, text="Loopback mode (captures are saved as 'loopback', "
-                                   "not used by the fit)",
-                        variable=self.loopback, command=self._on_loopback_toggle
-                        ).pack(anchor="w", padx=6, pady=4)
+        ttk.Checkbutton(loop, text="Loopback mode", variable=self.loopback,
+                        command=self._on_loopback_toggle).pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Label(loop, text="Captures are saved as 'loopback' and not used by the fit; "
+                             "the plots show volts.", wraplength=380, foreground="#666"
+                  ).pack(anchor="w", padx=6, pady=(0, 4))
         self.loop_widgets = []
         row = ttk.Frame(loop)
         row.pack(fill="x", padx=6)
@@ -483,6 +591,8 @@ class App(tk.Tk):
             w = ttk.Radiobutton(row, text=mode, value=mode, variable=self.ao_mode)
             w.pack(side="left", padx=(0, 6))
             self.loop_widgets.append(w)
+        row = ttk.Frame(loop)
+        row.pack(fill="x", padx=6, pady=(0, 4))
         self.ao_volts = tk.StringVar(value="1.0")
         self.ao_freq = tk.StringVar(value="2.0")
         self.ao_offset = tk.StringVar(value="0.0")
@@ -501,29 +611,6 @@ class App(tk.Tk):
         ttk.Label(loop, text="Wire the AOUT pin to the chosen CH terminal and AGND "
                              "(pin 14) to an AGND. Unhook that load-cell lead first.",
                   wraplength=380, foreground="#666").pack(anchor="w", padx=6, pady=(0, 6))
-
-    def _build_plot(self):
-        frame = ttk.LabelFrame(self, text="Signals")
-        frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8))
-        self.figure = Figure(figsize=(10, 3.4), dpi=90)
-        self.axes = self.figure.subplots(1, 4, sharex=True)
-        self.lines = []
-        for cell, ax in enumerate(self.axes, start=1):
-            ax.set_title(f"load cell {cell}", fontsize=10)
-            ax.grid(True, alpha=0.3)
-            ax.set_xlabel("s")
-            for axis in "XYZ":
-                (line,) = ax.plot([], [], color=AXIS_COLORS[axis], linewidth=0.9,
-                                  label=f"{cell}{axis}")
-                self.lines.append(line)
-            ax.legend(loc="upper right", fontsize=8)
-        self.axes[0].set_ylabel("volts")
-        self.figure.tight_layout()
-        self.plot_canvas = FigureCanvasTkAgg(self.figure, master=frame)
-        self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
-        self.columnconfigure(0, weight=0)
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(1, weight=1, minsize=160)   # never squash the plot to nothing
 
     # -- deck drawing ---------------------------------------------------------
     def _to_screen(self, x: float, y: float) -> tuple[float, float]:
@@ -569,8 +656,8 @@ class App(tk.Tk):
         c.create_text((x0 + x1) / 2, y1 - 14, text="BACK", fill="#998",
                       font=("Helvetica", 11, "bold"))
 
-        for cell, (fb, lr) in CELL_CORNERS.items():
-            sx, sy = self._to_screen(0 if lr == "left" else W, 0 if fb == "front" else L)
+        for cell, (cx, cy) in zip("1234", self.layout.positions):
+            sx, sy = self._to_screen(cx, cy)
             c.create_oval(sx - 11, sy - 11, sx + 11, sy + 11, fill="#556", outline="")
             c.create_text(sx, sy, text=cell, fill="white", font=("Helvetica", 10, "bold"))
 
@@ -584,6 +671,18 @@ class App(tk.Tk):
         if self.location is not None:
             sx, sy = self._to_screen(*self.location)
             self._draw_force(sx, sy, self.direction.get())
+        self._draw_cop()
+
+    def _draw_cop(self):
+        """Blue target where the four Z forces balance; redrawn alone in live view."""
+        c = self.canvas
+        c.delete("cop")
+        if self.cop is None:
+            return
+        sx, sy = self._to_screen(*self.cop)
+        c.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, outline=COP_COLOR, width=2, tags="cop")
+        c.create_line(sx - 13, sy, sx + 13, sy, fill=COP_COLOR, width=2, tags="cop")
+        c.create_line(sx, sy - 13, sx, sy + 13, fill=COP_COLOR, width=2, tags="cop")
 
     def _draw_force(self, sx: float, sy: float, direction: str):
         c = self.canvas
@@ -621,8 +720,15 @@ class App(tk.Tk):
             if -tol <= x <= self.deck_width + tol and -tol <= y <= self.deck_length + tol:
                 self.location = (x, y)
                 name = self.length_unit.get()
-                self.location_label.config(text=f"{self.x_var.get()} {name} right of the left "
-                                                f"edge, {self.y_var.get()} {name} back from the front")
+                text = (f"Load at {self.x_var.get()} {name} right of the left edge, "
+                        f"{self.y_var.get()} {name} back from the front")
+                try:
+                    below = float(self.z_var.get()) != 0
+                except ValueError:
+                    below = True        # shown, so the bad entry gets noticed
+                if below:
+                    text += f", {self.z_var.get()} {name} below the deck (set in Details)"
+                self.location_label.config(text=text)
             else:
                 self.location_label.config(text="That point is off the deck.")
         self._redraw_deck()
@@ -645,7 +751,7 @@ class App(tk.Tk):
         self.tare_button.config(state="normal" if can and not loop else "disabled")
         load_ok = loop or self.location is not None
         self.capture_button.config(state="normal" if can and load_ok else "disabled",
-                                   text="Capture loopback" if loop else "Capture load")
+                                   text=self._log_text(loop))
         self.live_check.config(state="normal" if self.worker else "disabled")
 
     def _capture(self, kind: str):
@@ -717,11 +823,13 @@ class App(tk.Tk):
         except Exception as e:
             self._save_failed(e, volts, rate)
             return
+        if kind == "tare":
+            self.zero_v = volts.mean(axis=0)
         self._refresh_trials()
-        self._redraw_deck()
         self.live.set(False)
         self._on_live_toggle()
-        self._plot(volts, rate, f"#{entry['id']}  {self._describe(entry)}")
+        self._show_trial(entry, volts)
+        self._redraw_deck()
 
         msg = f"Saved {entry['file']} ({kind})."
         if kind == "loopback":
@@ -766,26 +874,84 @@ class App(tk.Tk):
         n = len(volts)
         self.live_buffer = np.roll(self.live_buffer, -n, axis=0)
         self.live_buffer[-n:] = volts
-        self._plot(self.live_buffer, fp.SAMPLE_RATE, "live",
-                   t0=-MONITOR_WINDOW_S)
+        now = dt.datetime.now()
+        if (now - self._last_live_draw).total_seconds() < LIVE_REDRAW_S:
+            return
+        self._last_live_draw = now
+        self._plot(self.live_buffer, fp.SAMPLE_RATE, "live", self.zero_v,
+                   t0=-MONITOR_WINDOW_S, points=LIVE_POINTS)
+        self._show_cop(volts[-MONITOR_BLOCK:].mean(axis=0), self.zero_v, "Live")
 
-    def _plot(self, volts: np.ndarray, rate: float, title: str, t0: float = 0.0):
-        t = t0 + np.arange(len(volts)) / rate
+    def _plot(self, volts: np.ndarray, rate: float, title: str, zero: np.ndarray | None,
+              t0: float = 0.0, points: int | None = None):
+        """
+        Newtons per cell (tared by `zero`), or volts in loopback mode. `points`
+        thins each line to about that many samples, for a quick live redraw.
+        """
+        loop = self.loopback.get()
+        data = volts if loop else fp.cell_forces(volts, zero, self.layout)
+        t = t0 + np.arange(len(data)) / rate
+        step = max(1, len(data) // points) if points else 1
         for i, line in enumerate(self.lines):
-            line.set_data(t, volts[:, i])
+            line.set_data(t[::step], data[::step, i])
         for ax in self.axes:
             ax.relim()
             ax.autoscale_view()
-        self.figure.suptitle(title, fontsize=10)
+            ax.set_ylabel("volts" if loop else "N", fontsize=8)
+        if loop:
+            note = "volts (loopback mode)"
+        else:
+            note = "newtons" + ("" if zero is not None else ", NOT TARED")
+            if self.layout.placeholder:
+                note += f", placeholder scale (edit {self.layout.path.name})"
+        self.showing_label.config(text=f"Plots: {title}, in {note}")
         self._highlight_channel(draw=False)
-        self.plot_canvas.draw_idle()
+        # Draw now, not when idle: queued redraws that outlast the 50 ms poll
+        # would never let the event loop go idle.
+        for canvas in self.plot_canvases:
+            canvas.draw()
+
+    def _show_cop(self, mean_v: np.ndarray, zero: np.ndarray | None, what: str):
+        """Centre of pressure from the four Z forces, on the deck and as text."""
+        self.cop = None
+        if self.loopback.get():
+            text = ""
+        elif zero is None:
+            text = f"{what}: tare first (no load, Tare) to see the centre of pressure."
+        else:
+            forces = fp.cell_forces(mean_v, zero, self.layout)
+            cop = fp.cop_from_cells(forces, self.layout)
+            if cop is None:
+                text = f"{what}: almost no load on the deck."
+            else:
+                x, y, total = cop
+                self.cop = (x, y)
+                u = self.length_unit.get()
+                text = (f"{what}: {total:.0f} N down; centre of pressure (blue) "
+                        f"{self._show_len(x)} {u} right, {self._show_len(y)} {u} back")
+        self.cop_label.config(text=text)
+        self._draw_cop()
 
     def _highlight_channel(self, draw: bool = True):
         target = self._wired_index() if self.loopback.get() else None
         for i, line in enumerate(self.lines):
             line.set_linewidth(2.2 if i == target else 0.9)
         if draw:
-            self.plot_canvas.draw_idle()
+            for canvas in self.plot_canvases:
+                canvas.draw_idle()
+
+    def _trial_mean_v(self, trial_id: int | None) -> np.ndarray | None:
+        t = next((t for t in self.session.trials if t["id"] == trial_id), None) \
+            if self.session and trial_id is not None else None
+        return np.array(t["mean_v"]) if t else None
+
+    def _show_trial(self, t: dict, volts: np.ndarray):
+        """Plot a saved capture, tared by its own tare (a load) or the latest one."""
+        zero = self._trial_mean_v(t.get("tare_id")) if t["kind"] == "load" else None
+        if zero is None:
+            zero = self.zero_v
+        self._plot(volts, t["rate_hz"], f"#{t['id']} {self._describe(t)}", zero)
+        self._show_cop(volts.mean(axis=0), zero, f"#{t['id']} average")
 
     # -- session list ---------------------------------------------------------
     def _describe(self, t: dict) -> str:
@@ -831,7 +997,7 @@ class App(tk.Tk):
         data = np.loadtxt(self.session.folder / t["file"], delimiter=",", skiprows=1)
         self.live.set(False)
         self._on_live_toggle()
-        self._plot(data[:, 1:], t["rate_hz"], f"#{t['id']}  {self._describe(t)}")
+        self._show_trial(t, data[:, 1:])
         if t.get("notes"):
             self._set_status(f"#{t['id']} notes: {t['notes']}")
 
@@ -889,14 +1055,14 @@ class App(tk.Tk):
                 "mode": self.ao_mode.get(), "volts": self.ao_volts.get(),
                 "freq_hz": self.ao_freq.get(), "offset": self.ao_offset.get()}
 
-    def _on_loopback_toggle(self):
+    def _on_loopback_toggle(self, quiet: bool = False):
         on = self.loopback.get()
         usable = on and self.daq is not None and self.daq.has_ao
         for w in self.loop_widgets:
             w.config(state=("readonly" if isinstance(w, ttk.Combobox) else "normal")
                      if usable else "disabled")
         if not on and self.worker is not None:
-            self.worker.send("ao_off")
+            self.worker.send("ao_off", quiet=quiet)
         self._highlight_channel()
         self._update_buttons()
 
@@ -985,10 +1151,10 @@ def free_space_mb(folder: Path) -> float | None:
 def main():
     parser = argparse.ArgumentParser(description="Force-plate calibration GUI.")
     parser.add_argument("--session", type=Path, help="existing session folder to add to")
-    parser.add_argument("--length", type=float, default=DECK_LENGTH_M,
-                        help="deck length front-to-back, metres")
-    parser.add_argument("--width", type=float, default=DECK_WIDTH_M,
-                        help="deck width side-to-side, metres")
+    parser.add_argument("--length", type=float,
+                        help="deck length front-to-back, metres (default: forceplate_layout.json)")
+    parser.add_argument("--width", type=float,
+                        help="deck width side-to-side, metres (default: forceplate_layout.json)")
     args = parser.parse_args()
 
     daq, error = None, ""
