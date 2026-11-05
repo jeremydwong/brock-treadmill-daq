@@ -202,6 +202,9 @@ during a log, with "strike" in the notes):
 ```
 uv run strike_tests.py "<session folder>"
 ```
+It turns every channel into newtons with the per-axis `newtons_per_volt` in
+`forceplate_layout.json` (see below) before the spectra, so each cell's X/Y/Z
+norm adds forces, not volts. Plot Results does the same.
 
 **Made a mistake?** Open **Details**, click the capture in the **Session** list
 and click **Remove selected**. Clicking a capture in the list also shows its

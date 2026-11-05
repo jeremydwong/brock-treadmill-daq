@@ -13,6 +13,11 @@ the mode's shape (bounce, pitch, roll, twist). It writes
 
 into the session folder, and prints the same tables.
 
+Units: each channel is turned into newtons with the per-axis newtons_per_volt
+in forceplate_layout.json before anything else, so the X/Y/Z norms add like
+forces. While that file says scale_is_placeholder, every channel has the same
+scale and the numbers are only relative.
+
 Method: the strike is the first sample where the summed deviation from the
 quiet start exceeds its mean + 10 std. The 1.024 s after it (mean and step
 removed, Hann window, zero-padded FFT) gives the spectrum; the 1 s before it is
@@ -62,8 +67,8 @@ CELL_LINESTYLES = {"1": "-", "2": "--", "3": ":", "4": "-."}
 # Analysis
 # ---------------------------------------------------------------------------
 
-def find_strike(volts: np.ndarray, quiet: int = 300) -> int:
-    dev = np.abs(volts - np.median(volts[:quiet], 0)).sum(1)
+def find_strike(forces: np.ndarray, quiet: int = 300) -> int:
+    dev = np.abs(forces - np.median(forces[:quiet], 0)).sum(1)
     above = dev > dev[:quiet].mean() + 10 * dev[:quiet].std()
     if not above.any():
         raise ValueError("no strike found")
@@ -71,7 +76,7 @@ def find_strike(volts: np.ndarray, quiet: int = 300) -> int:
 
 
 def spectrum(seg: np.ndarray, rate: float) -> tuple[np.ndarray, np.ndarray]:
-    """Complex amplitude spectrum (volts) of each column, mean and step removed."""
+    """Complex amplitude spectrum of each column, mean and step removed."""
     seg = seg - seg.mean(0)
     seg = seg - np.linspace(0, 1, len(seg))[:, None] * (seg[-1] - seg[0])
     w = np.hanning(len(seg))[:, None]
@@ -121,15 +126,16 @@ def mode_shape(phases: np.ndarray, amps: np.ndarray) -> str:
     return "cells " + ",".join(map(str, up)) + " against " + ",".join(map(str, down))
 
 
-def analyse(path: Path) -> dict:
+def analyse(path: Path, layout: fp.Layout) -> dict:
     data = np.loadtxt(path, delimiter=",", skiprows=1)
-    t, volts = data[:, 0], data[:, 1:]
+    t = data[:, 0]
+    forces = fp.cell_forces(data[:, 1:], None, layout)    # newtons; the mean is removed below
     rate = 1 / np.median(np.diff(t))
-    k0 = find_strike(volts)
-    if k0 + WINDOW > len(volts) or k0 < WINDOW + 50:
+    k0 = find_strike(forces)
+    if k0 + WINDOW > len(forces) or k0 < WINDOW + 50:
         raise ValueError(f"strike at {t[k0]:.2f} s is too close to the edge of the capture")
-    f, post = spectrum(volts[k0:k0 + WINDOW], rate)
-    _, pre = spectrum(volts[k0 - WINDOW - 50:k0 - 50], rate)
+    f, post = spectrum(forces[k0:k0 + WINDOW], rate)
+    _, pre = spectrum(forces[k0 - WINDOW - 50:k0 - 50], rate)
     deck_post = np.sqrt((np.abs(post) ** 2).sum(1))
     deck_pre = np.sqrt((np.abs(pre) ** 2).sum(1))
 
@@ -140,11 +146,11 @@ def analyse(path: Path) -> dict:
         z = a[Z]
         ref = int(np.argmax(np.abs(z)))
         phases = np.degrees(np.angle(z / z[ref]))
-        modes.append({"hz": float(f[i]), "amp_v": float(deck_post[i]), "axis_v": axis,
-                      "cell_norm_v": cell_norms(a[None])[0].tolist(),
-                      "z_amp_v": np.abs(z).tolist(), "z_phase_deg": phases.tolist(),
+        modes.append({"hz": float(f[i]), "amp_n": float(deck_post[i]), "axis_n": axis,
+                      "cell_norm_n": cell_norms(a[None])[0].tolist(),
+                      "z_amp_n": np.abs(z).tolist(), "z_phase_deg": phases.tolist(),
                       "shape": mode_shape(phases, np.abs(z))})
-    strongest = max(modes, key=lambda m: m["amp_v"])
+    strongest = max(modes, key=lambda m: m["amp_n"])
     # Each cell's norm in each band, as a fraction of the other three cells' mean
     norms = cell_norms(post)
     bands = {}
@@ -152,7 +158,7 @@ def analyse(path: Path) -> dict:
         e = np.sqrt((norms[(f >= lo) & (f < hi)] ** 2).sum(0))
         bands[f"{lo}-{hi}"] = [float(e[c] / np.delete(e, c).mean()) for c in range(4)]
     return {"file": path.name, "strike_s": float(t[k0]), "k0": k0, "rate": rate,
-            "t": t, "volts": volts, "f": f, "post": post, "deck_post": deck_post,
+            "t": t, "forces": forces, "f": f, "post": post, "deck_post": deck_post,
             "deck_pre": deck_pre, "modes": modes, "strongest_hz": strongest["hz"],
             "cell_norm_spec": norms, "bands": bands}
 
@@ -161,8 +167,8 @@ def analyse(path: Path) -> dict:
 # Figure and report
 # ---------------------------------------------------------------------------
 
-def plot(r: dict, title: str, out: Path):
-    t, v, k0, f = r["t"], r["volts"], r["k0"], r["f"]
+def plot(r: dict, title: str, out: Path, unit: str = "N"):
+    t, v, k0, f = r["t"], r["forces"], r["k0"], r["f"]
     f0 = r["strongest_hz"]
     fig = plt.figure(figsize=(12, 9.5), constrained_layout=True)
     gs = fig.add_gridspec(3, 2, height_ratios=[1, 1.3, 1])
@@ -172,11 +178,11 @@ def plot(r: dict, title: str, out: Path):
     dev = np.linalg.norm((v - rest).reshape(len(v), 4, 3), axis=2)
     for cell in "1234":
         ax.plot(t - t[k0], dev[:, int(cell) - 1], color=NORM_COLOR, ls=CELL_LINESTYLES[cell],
-                lw=0.9, label=f"cell {cell} |Δv|")
+                lw=0.9, label=f"cell {cell} |ΔF|")
     ax.axvspan(0, WINDOW / r["rate"], color="#888", alpha=0.08)
     ax.set_xlim(-0.2, 1.5)
     ax.set_xlabel("time from strike (s)")
-    ax.set_ylabel("|Δ volts|")
+    ax.set_ylabel(f"|ΔF| ({unit})")
     ax.set_title(f"{title}: each cell's X/Y/Z vector, length (shaded = window analysed)")
     ax.legend(ncol=4, loc="upper right")
     ax.grid(alpha=0.3)
@@ -186,12 +192,12 @@ def plot(r: dict, title: str, out: Path):
     ax.semilogy(f, r["deck_pre"], color="#aaa", lw=1, label="before strike (noise floor)")
     for m in r["modes"]:
         main = m["hz"] == f0
-        ax.annotate(f"{m['hz']:.1f} Hz", (m["hz"], m["amp_v"]), xytext=(0, 8),
+        ax.annotate(f"{m['hz']:.1f} Hz", (m["hz"], m["amp_n"]), xytext=(0, 8),
                     textcoords="offset points", ha="center", fontsize=10,
                     fontweight="bold" if main else "normal", color="#c22" if main else "#333")
     ax.set_xlim(0, 150)
     ax.set_xlabel("frequency (Hz)")
-    ax.set_ylabel("amplitude (V)")
+    ax.set_ylabel(f"amplitude ({unit})")
     ax.set_title(f"Resonance: {f0:.1f} Hz  (strongest peak; others labelled)")
     ax.legend(loc="upper right")
     ax.grid(alpha=0.3, which="both")
@@ -202,9 +208,9 @@ def plot(r: dict, title: str, out: Path):
                     ls=CELL_LINESTYLES[cell], lw=1, label=f"cell {cell}")
     ax.axvline(f0, color="#c22", lw=0.8, ls="--")
     ax.set_xlim(5, 100)
-    ax.set_ylim(1e-4, None)
+    ax.set_ylim(r["cell_norm_spec"][(f > 5) & (f < 100)].max() * 1e-4, None)
     ax.set_xlabel("frequency (Hz)")
-    ax.set_ylabel("amplitude (V)")
+    ax.set_ylabel(f"amplitude ({unit})")
     ax.set_title("Per load cell (norm of X, Y, Z)")
     ax.legend()
     ax.grid(alpha=0.3, which="both")
@@ -235,12 +241,12 @@ def plot(r: dict, title: str, out: Path):
 
 
 def mode_table(r: dict) -> list[str]:
-    lines = ["| Mode (Hz) | Deck (V) | X (V) | Y (V) | Z (V) | Cell norm, cells 1-4 (V) | Z phase, cells 1-4 (deg) | Motion |",
+    lines = ["| Mode (Hz) | Deck (N) | X (N) | Y (N) | Z (N) | Cell norm, cells 1-4 (N) | Z phase, cells 1-4 (deg) | Motion |",
              "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for m in r["modes"]:
-        ax = m["axis_v"]
-        lines.append(f"| {m['hz']:.1f} | {m['amp_v']:.3f} | {ax['X']:.4f} | {ax['Y']:.4f} | "
-                     f"{ax['Z']:.4f} | " + " ".join(f"{a:.3f}" for a in m["cell_norm_v"]) + " | "
+        ax = m["axis_n"]
+        lines.append(f"| {m['hz']:.1f} | {m['amp_n']:.1f} | {ax['X']:.2f} | {ax['Y']:.2f} | "
+                     f"{ax['Z']:.2f} | " + " ".join(f"{a:.2f}" for a in m["cell_norm_n"]) + " | "
                      + " ".join(f"{p:+.0f}" for p in m["z_phase_deg"]) + f" | {m['shape']} |")
     return lines
 
@@ -256,18 +262,21 @@ def band_table(results: list[tuple[dict, dict]]) -> list[str]:
     return lines
 
 
-def write_report(session: Path, results: list[tuple[dict, dict]], out_dir: Path) -> Path:
+def write_report(session: Path, results: list[tuple[dict, dict]], out_dir: Path,
+                 placeholder: bool) -> Path:
     lines = [f"# Strike tests: {session.name}", "",
              "| Trial | Notes | Strike (s) | Strongest mode (Hz) | Other modes (Hz) |",
              "| --- | --- | --- | --- | --- |"]
     for entry, r in results:
         others = sorted((m for m in r["modes"] if m["hz"] != r["strongest_hz"]),
-                        key=lambda m: -m["amp_v"])
+                        key=lambda m: -m["amp_n"])
         lines.append(f"| {entry['id']} | {entry.get('notes', '').strip()} | {r['strike_s']:.3f} | "
                      f"{r['strongest_hz']:.1f} | " + ", ".join(f"{m['hz']:.1f}" for m in others) + " |")
     lines += ["", "Z cells: 1 front left, 2 front right, 3 right rear, 4 left rear. Phases are "
               "relative to the cell with the largest response; cells under 10% of it are not "
-              "used to name the motion. Amplitudes are uncalibrated volts.", "",
+              "used to name the motion. Amplitudes are newtons from forceplate_layout.json"
+              + (" (PLACEHOLDER scale: equal for every channel, so only relative)." if placeholder
+                 else "."), "",
               "## Each cell against the others",
               "",
               "A cell's norm of X, Y and Z in each frequency band, after the strike, divided "
@@ -296,16 +305,20 @@ def main():
         parser.error("no trials given and none have 'strike' in their notes")
     out_dir = args.out or args.session / "strike_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
+    layout = fp.load_layout()
+    unit = "N, placeholder scale" if layout.placeholder else "N"
+    if layout.placeholder:
+        print(f"Note: {layout.path.name} still has placeholder scales; newtons are only relative.")
 
     results = []
     for tid in ids:
         entry = by_id[tid]
         try:
-            r = analyse(args.session / entry["file"])
+            r = analyse(args.session / entry["file"], layout)
         except ValueError as e:
             print(f"trial {tid}: skipped, {e}")
             continue
-        plot(r, f"{args.session.name}/{entry['file']}", out_dir / f"{Path(entry['file']).stem}_resonance.png")
+        plot(r, f"{args.session.name}/{entry['file']}", out_dir / f"{Path(entry['file']).stem}_resonance.png", unit)
         results.append((entry, r))
         print(f"\ntrial {tid} ({entry.get('notes', '').strip()}): strike at {r['strike_s']:.3f} s, "
               f"strongest {r['strongest_hz']:.1f} Hz")
@@ -314,7 +327,7 @@ def main():
     if results:
         print("\nEach cell's norm per band, / mean of the other three cells:")
         print("\n".join(band_table(results)))
-        print(f"\nWrote {write_report(args.session, results, out_dir)} and "
+        print(f"\nWrote {write_report(args.session, results, out_dir, layout.placeholder)} and "
               f"{len(results)} figure(s) in {out_dir}")
 
 
