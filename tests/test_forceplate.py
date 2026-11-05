@@ -481,12 +481,16 @@ def test_gui_post_window(app):
     app._on_post_toggle()
     win = app.post_window
     assert win is not None and len(win.vars) == 16
-    assert win.checked() == ["1|F|", "2|F|", "3|F|", "4|F|"]      # default: the four norms
+    assert win.view.get() == "grid" and win.median.get()           # defaults
+    assert win.checked() == ["1|F|", "2|F|", "3|F|", "4|F|"]      # overlay default: the norms
+    win.view.set("overlay")
 
     capture(app, "tare")
     app.x_var.set("0.3")
     app.y_var.set("0.5")
     capture(app, "load")
+    win.median.set(False)
+    win._redraw()
     assert len(win.lines) == 16
     assert [k for k, l in win.lines.items() if l.get_visible()] == win.checked()
     # |F| is the length of each cell's force vector
@@ -505,6 +509,7 @@ def test_gui_post_window(app):
     win.close()                                        # closing the window unticks the box
     assert app.post_window is None and not app.post.get()
     assert app.settings["post_checked"] == ["1Z", "2Z", "3Z", "4Z"]   # remembered
+    assert app.settings["post_view"] == "overlay"
 
 
 def test_gui_tare_zeros_the_live_view_from_then_on(app):
@@ -606,10 +611,9 @@ def test_gui_post_grid_view_and_median(app):
     t = np.arange(5000) / 1000.0
     data = np.full((5000, 12), 100.0)                   # big offsets everywhere
     data[:, 8] += 3.0 * np.sin(2 * np.pi * 41 * t)      # 3Z rings, amplitude 3
+    win.median.set(False)
     win.show(data, 1000.0, "synthetic", "newtons")
-
-    win.view.set("grid")
-    win._redraw()
+    assert win.view.get() == "grid"                     # the default view
     axes = win.figure.axes
     assert len(axes) == 16 and len(win.stats) == 16
     assert all(ax.get_ylim() == axes[0].get_ylim() for ax in axes)   # one scale
@@ -677,3 +681,44 @@ def test_gui_load_data_default_folder_and_viewer(app, monkeypatch, tmp_path):
     assert app.settings["last_load_dir"] == str(old)
     assert app.session is None                          # viewing never touches a session
     app.post_window.close()
+
+
+def test_gui_live_view_without_a_daq_connects_when_plugged_in(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    import forceplate_gui as gui
+    from mcc1608g import DaqError
+    monkeypatch.setattr(gui, "SETTINGS", tmp_path / "settings.json")
+    monkeypatch.setattr(gui, "DEFAULT_DATA_DIR", tmp_path / "data")
+    for name in ("claim_interface", "release_interface"):
+        monkeypatch.setattr(usb.util, name, lambda d, i: None)
+    monkeypatch.setattr(usb.util, "dispose_resources", lambda d: None)
+    monkeypatch.setattr(usb.util, "get_string", lambda d, i: d.serial_number)
+    try:
+        app = gui.App(None, "not plugged in")
+    except tk.TclError:
+        pytest.skip("no display")
+    app.withdraw()
+    try:
+        assert str(app.live_check.cget("state")) == "normal"     # clickable with no DAQ
+        def unplugged():
+            raise DaqError("No MCC USB-1608G-family device found.")
+        app.open_daq = unplugged
+        app.live.set(True)
+        app._on_live_toggle()
+        assert not app.live.get() and "No DAQ" in app.status.cget("text")
+
+        scan = gui.DaqWorker._scan                     # pace the fake like the real 1 kHz clock
+        def paced_scan(worker, samples):
+            time.sleep(samples / fp.SAMPLE_RATE)
+            return scan(worker, samples)
+        monkeypatch.setattr(gui.DaqWorker, "_scan", paced_scan)
+        app.open_daq = lambda: USB1608G(FakeUsbDevice())          # now plugged in
+        app.live.set(True)
+        app._on_live_toggle()
+        assert app.worker is not None and app.live.get()
+        assert "Connected" in app.status.cget("text")
+        pump(app, lambda: app.worker.monitoring)
+        app.live.set(False)
+        app._on_live_toggle()
+    finally:
+        app._on_close()

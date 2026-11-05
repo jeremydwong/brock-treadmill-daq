@@ -247,9 +247,9 @@ class BigButton(tk.Label):
 class PostWindow(tk.Toplevel):
     """
     A whole capture, zoomable. Two views:
+      grid     (the default) a 4 x 4 grid (cells x X, Y, Z, |F|), every panel
+               on the same y scale, with the rms of each over the time range shown
       overlay  one plot; sixteen checkboxes pick each cell's X, Y, Z and |F|
-      grid     a 4 x 4 grid (cells x X, Y, Z, |F|), every panel on the same y
-               scale, with the rms of each over the time range shown
     "Subtract each channel's median" puts every trace at zero, so sizes can be
     compared whatever the tare. |F| is the length of a cell's force vector,
     sqrt(X^2 + Y^2 + Z^2). Bottom left: each cell's spectrum (norm of X, Y, Z)
@@ -260,9 +260,9 @@ class PostWindow(tk.Toplevel):
     STYLE_NAMES = {"1": "solid", "2": "dashed", "3": "dotted", "4": "dash-dot"}
 
     def __init__(self, app: "App", checked: list[str], on_close,
-                 view: str = "overlay", median: bool = False):
+                 view: str = "grid", median: bool = True):
         super().__init__(app)
-        self.title("Post: capture viewer")
+        self.title("Plot Results")
         self.geometry("1250x880")
         self._on_close_cb = on_close
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -271,8 +271,8 @@ class PostWindow(tk.Toplevel):
         self.left.pack(side="left", fill="y", padx=8, pady=8)
         opts = ttk.LabelFrame(self.left, text="View")
         opts.pack(fill="x", pady=(0, 6))
-        self.view = tk.StringVar(value=view if view in ("overlay", "grid") else "overlay")
-        for text, value in (("overlay (pick below)", "overlay"), ("grid: all 16, same scale", "grid")):
+        self.view = tk.StringVar(value=view if view in ("overlay", "grid") else "grid")
+        for text, value in (("grid: all 16, same scale", "grid"), ("overlay (pick below)", "overlay")):
             ttk.Radiobutton(opts, text=text, value=value, variable=self.view,
                             command=self._redraw).pack(anchor="w", padx=4)
         self.median = tk.BooleanVar(value=median)
@@ -533,6 +533,7 @@ class App(tk.Tk):
         self.cop: tuple[float, float] | None = None     # (x, y) metres, drawn on the deck
 
         self.daq = daq
+        self.open_daq = USB1608G.open           # how _connect looks for a DAQ later
         self.worker: DaqWorker | None = None
         if daq is not None:
             self.worker = DaqWorker(daq)
@@ -612,7 +613,7 @@ class App(tk.Tk):
             self._on_post_toggle()
         self.post_window.show(*shown)
         self.post_window.lift()
-        self._set_status(f"Viewing {path.parent.name}/{path.name} in the post window.")
+        self._set_status(f"Viewing {path.parent.name}/{path.name} in the Plot Results window.")
 
     # -- layout: everything visual on the left -------------------------------
     def _build_visuals(self):
@@ -845,7 +846,7 @@ class App(tk.Tk):
                                           command=self._on_live_toggle)
         self.live_check.pack(side="left")
         self.post = tk.BooleanVar(value=False)
-        ttk.Checkbutton(views, text="Display post", variable=self.post,
+        ttk.Checkbutton(views, text="Plot Results", variable=self.post,
                         command=self._on_post_toggle).pack(side="left", padx=(16, 0))
 
         buttons = ttk.Frame(main)
@@ -1150,7 +1151,7 @@ class App(tk.Tk):
         load_ok = (loop or self.location is not None) and self._seconds() is not None
         self.capture_button.config(state="normal" if can and load_ok else "disabled",
                                    text=self._log_text(loop))
-        self.live_check.config(state="normal" if self.worker else "disabled")
+        self.live_check.config(state="normal")       # no DAQ: ticking it looks for one
 
     def _capture(self, kind: str):
         if self.loopback.get():
@@ -1265,9 +1266,29 @@ class App(tk.Tk):
         messagebox.showerror("Save failed", f"{error}\n\n{where}")
 
     # -- live view and plotting ----------------------------------------------
+    def _connect(self) -> bool:
+        """Look for the DAQ now (it may have been plugged in after the app started)."""
+        if self.worker is not None:
+            return True
+        try:
+            self.daq = self.open_daq()
+        except DaqError as e:
+            self._set_status(f"No DAQ: {e}  Plug it in (and check the driver), then tick "
+                             "Live view again.")
+            return False
+        self.worker = DaqWorker(self.daq)
+        self.worker.start()
+        self._on_loopback_toggle(quiet=True)
+        self._set_status(f"Connected to {self.daq}.")
+        return True
+
     def _on_live_toggle(self):
+        if self.live.get() and not self._connect():
+            self.live.set(False)
         if self.worker is None:
+            self._update_buttons()
             return
+        self._update_buttons()
         on = self.live.get()
         if on:
             self.live_buffer[:] = np.nan
@@ -1378,8 +1399,8 @@ class App(tk.Tk):
         if self.post.get() and self.post_window is None:
             checked = self.settings.get("post_checked", [f"{c}|F|" for c in "1234"])
             self.post_window = PostWindow(self, checked, self._on_post_closed,
-                                          view=self.settings.get("post_view", "overlay"),
-                                          median=bool(self.settings.get("post_median", False)))
+                                          view=self.settings.get("post_view", "grid"),
+                                          median=bool(self.settings.get("post_median", True)))
             if self.post_data is not None:
                 self.post_window.show(*self.post_data)
         elif not self.post.get() and self.post_window is not None:

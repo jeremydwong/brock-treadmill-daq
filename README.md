@@ -184,16 +184,17 @@ moves. It is worked out only from the four Z forces and where the cells sit,
 before any calibration, so it's a sanity check: a weight placed on the deck
 should land close to its red marker.
 
-**Display post** (tick box) opens a second window showing the latest log, or the
+**Plot Results** (tick box) opens a second window showing the latest log, or the
 trial you click in Details ▸ Session. Zoom with the toolbar's magnifier, pan with
-the cross, and go back with the house. **View: grid** shows all 16 traces (each
-cell's X, Y, Z and |F|, the length of its force vector) on one scale, with the
-rms of each over the time range on screen; **subtract each channel's median**
-puts every trace at zero. Bottom left is each cell's spectrum over the time
+the cross, and go back with the house. It opens in the **grid** view: all 16
+traces (each cell's X, Y, Z and |F|, the length of its force vector) on one
+scale, each minus its own median so every trace sits at zero, with the rms of
+each over the time range on screen. **Overlay** puts chosen traces on one plot
+instead; untick **subtract each channel's median** to see the raw levels. Bottom left is each cell's spectrum over the time
 range shown, which follows your zoom. Colours always mean the component
 (X blue, Y orange, Z green, |F| grey).
 
-**File ▸ Load data…** opens any earlier capture CSV in that window, to look
+**File ▸ Load data…** opens any earlier capture CSV in the Plot Results window, to look
 at old data. It starts in today's session folder, or the folder you used last.
 
 To find the deck's resonant frequencies from strike tests (tap the deck once
