@@ -128,7 +128,7 @@ To quit, close the window.
   - **Below it: the deck size.**
 - **Right: the words and buttons.** At the top, the things you set for
   each capture (direction, load, where it is, optional depth below the deck,
-  notes) and the **Tare** and **Log 5 s of data** buttons. Under them, a blue line gives the total down
+  notes) and the **Tare** and green **Log Data** buttons. Under them, a blue line gives the total down
   force and the **centre of pressure**, which is also drawn on the deck as a
   blue target.
 - **Details** (click to open): the data folder, the list of captures, **Fit**,
@@ -168,7 +168,8 @@ ft only changes what's shown; you can switch any time.
    next to it.
 6. **Notes** (optional): anything worth remembering, e.g. "2 × 10 kg plates,
    belt off". Notes are saved with every capture until you change them.
-7. Click **Log 5 s of data** and **keep everything still** for 5 seconds.
+7. Click **Log Data** and **keep everything still** until the bar fills (5 s by
+   default; change **log length**, up to 120 s).
 8. Repeat steps 2–7 with weights in many different places and in all five
    directions. Grey dots on the drawing show where you've already measured.
    Re-tare (step 1) every so often. Each capture uses the most recent tare.
@@ -182,6 +183,24 @@ After a tare it also moves the blue centre-of-pressure target as the load
 moves. It is worked out only from the four Z forces and where the cells sit,
 before any calibration, so it's a sanity check: a weight placed on the deck
 should land close to its red marker.
+
+**Display post** (tick box) opens a second window showing the latest log, or the
+trial you click in Details ▸ Session. Zoom with the toolbar's magnifier, pan with
+the cross, and go back with the house. **View: grid** shows all 16 traces (each
+cell's X, Y, Z and |F|, the length of its force vector) on one scale, with the
+rms of each over the time range on screen; **subtract each channel's median**
+puts every trace at zero. Bottom left is each cell's spectrum over the time
+range shown, which follows your zoom. Colours always mean the component
+(X blue, Y orange, Z green, |F| grey).
+
+**File ▸ Load data…** opens any earlier capture CSV in that window, to look
+at old data. It starts in today's session folder, or the folder you used last.
+
+To find the deck's resonant frequencies from strike tests (tap the deck once
+during a log, with "strike" in the notes):
+```
+uv run strike_tests.py "<session folder>"
+```
 
 **Made a mistake?** Open **Details**, click the capture in the **Session** list
 and click **Remove selected**. Clicking a capture in the list also shows its

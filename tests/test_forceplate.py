@@ -439,3 +439,241 @@ def test_gui_save_failure_keeps_data(app, monkeypatch, tmp_path):
     rescued = list(tmp_path.glob("forceplate_unsaved_*.csv"))
     assert len(rescued) == 1
     assert np.loadtxt(rescued[0], delimiter=",", skiprows=1).shape == (5000, 13)
+
+
+def test_gui_logs_without_a_tare_and_without_asking(app, monkeypatch):
+    import forceplate_gui as gui
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: pytest.fail("asked"))
+    app.x_var.set("0.3")
+    app.y_var.set("0.5")
+    capture(app, "load")
+    assert app.session.trials[-1]["kind"] == "load"
+    assert app.session.trials[-1]["tare_id"] is None
+
+
+def test_gui_progress_bar_clears_after_save(app):
+    capture(app, "tare")
+    assert app.progress["value"] == 100                 # full right when the save lands
+    pump(app, lambda: app.progress["value"] == 0, timeout=5)
+
+
+def test_gui_live_view_comes_back_after_a_log(app):
+    scan = app.worker._scan
+    def paced_scan(samples):
+        time.sleep(samples / fp.SAMPLE_RATE / 20)       # quicker than real time, but paced
+        return scan(samples)
+    app.worker._scan = paced_scan
+
+    capture(app, "tare")                                # live off before: stays off
+    assert not app.live.get() and not app.worker.monitoring
+    app.live.set(True)
+    app._on_live_toggle()
+    capture(app, "tare")                                # live on before: back on after
+    assert app.live.get()
+    pump(app, lambda: app.worker.monitoring)
+    pump(app, lambda: not np.isnan(app.live_buffer[-1]).any())
+    app.live.set(False)
+    app._on_live_toggle()
+
+
+def test_gui_post_window(app):
+    app.post.set(True)
+    app._on_post_toggle()
+    win = app.post_window
+    assert win is not None and len(win.vars) == 16
+    assert win.checked() == ["1|F|", "2|F|", "3|F|", "4|F|"]      # default: the four norms
+
+    capture(app, "tare")
+    app.x_var.set("0.3")
+    app.y_var.set("0.5")
+    capture(app, "load")
+    assert len(win.lines) == 16
+    assert [k for k, l in win.lines.items() if l.get_visible()] == win.checked()
+    # |F| is the length of each cell's force vector
+    x, y, z, norm = (win.lines[f"2{c}"].get_data()[1] for c in ("X", "Y", "Z", "|F|"))
+    np.testing.assert_allclose(norm, np.sqrt(x ** 2 + y ** 2 + z ** 2))
+
+    win._pick_only(["Z"])
+    assert win.checked() == ["1Z", "2Z", "3Z", "4Z"]
+    assert sum(l.get_visible() for l in win.lines.values()) == 4
+
+    # Picking an older trial in the session list shows it in the post window
+    app.trial_list.selection_set(0)
+    app._on_trial_select(None)
+    assert win.ax.get_title().startswith("#1 tare")
+
+    win.close()                                        # closing the window unticks the box
+    assert app.post_window is None and not app.post.get()
+    assert app.settings["post_checked"] == ["1Z", "2Z", "3Z", "4Z"]   # remembered
+
+
+def test_gui_tare_zeros_the_live_view_from_then_on(app):
+    """The fake loops AOUT0 into CH0H (1X): hold 1.5 V, tare, step to 2.0 V."""
+    scan = app.worker._scan
+    def paced_scan(samples):
+        time.sleep(samples / fp.SAMPLE_RATE / 20)
+        return scan(samples)
+    app.worker._scan = paced_scan
+    npv = app.layout.newtons_per_volt[0]
+    line_1x = app.lines[fp.SIGNAL_NAMES.index("1X")]
+
+    app.worker.send("ao_dc", channel=0, volts=1.5)
+    pump(app, lambda: "holding" in app.status.cget("text"))
+    capture(app, "tare")
+    assert app.zero_v[0] == pytest.approx(1.5, abs=0.002)
+
+    app.live.set(True)
+    app._on_live_toggle()
+    app.worker.send("ao_dc", channel=0, volts=2.0)
+    def shows(newtons):
+        y = line_1x.get_data()[1]
+        y = y[~np.isnan(y)]
+        return len(y) > 50 and np.allclose(y[-50:], newtons, atol=0.005 * npv)
+    pump(app, lambda: shows(0.5 * npv))                # only the change since the tare
+    assert "NOT TARED" not in app.showing_label.cget("text")
+    app.live.set(False)
+    app._on_live_toggle()
+
+
+def test_gui_log_length(app, monkeypatch):
+    import forceplate_gui as gui
+    assert app.log_seconds.get() == "5"
+    assert app.capture_button.cget("text") == "Log Data\n(5 seconds)"
+    app.log_seconds.set("121")                          # over the limit: can't log
+    assert str(app.capture_button.cget("state")) == "disabled"
+    assert str(app.tare_button.cget("state")) == "disabled"
+    app.log_seconds.set("abc")
+    assert app.capture_button.cget("text") == "Log Data\n(? seconds)"
+    app.log_seconds.set("2.5")
+    assert app.capture_button.cget("text") == "Log Data\n(2.5 seconds)"
+    capture(app, "tare")
+    t = app.session.trials[-1]
+    assert t["seconds"] == 2.5
+    data = np.loadtxt(app.session.folder / t["file"], delimiter=",", skiprows=1)
+    assert data.shape == (2500, 13)
+    assert app.settings["log_seconds"] == 2.5           # remembered for next time
+
+
+def test_gui_post_window_spectra_follow_the_zoom(app):
+    app.post.set(True)
+    app._on_post_toggle()
+    win = app.post_window
+    # A 41 Hz ring on cell 3 (all three axes) and 28 Hz on cell 1, in newtons
+    t = np.arange(5000) / 1000.0
+    data = np.zeros((5000, 12))
+    data[:, 6:9] = np.sin(2 * np.pi * 41.0 * t)[:, None] * [1, 2, 3]
+    data[:, 0:3] = np.sin(2 * np.pi * 28.0 * t)[:, None] * [0, 0, 1]
+    win.show(data, 1000.0, "synthetic", "newtons")
+    titles = [ax.get_title(loc="left") for ax in win.spec_axes]
+    assert titles[2] == "cell 3: peak 41.0 Hz" and titles[0] == "cell 1: peak 28.0 Hz"
+    win.ax.set_xlim(1.0, 1.05)                          # 50 samples: too short
+    win._update_spectra()
+    assert "too short" in win.spec_axes[0].get_title()
+    win.ax.set_xlim(1.0, 2.0)
+    win._update_spectra()
+    assert "1.00 s analysed" in win.spec_axes[-1].get_xlabel()
+    win.close()
+
+
+def test_long_capture_csv_round_trip(tmp_path):
+    volts = np.random.default_rng(0).uniform(-10, 10, (int(fp.MAX_CAPTURE_SECONDS * 1000), 12))
+    t0 = time.perf_counter()
+    fp.save_capture_csv(tmp_path / "long.csv", volts, 1000.0)
+    assert time.perf_counter() - t0 < 30
+    assert (tmp_path / "long.csv").stat().st_size < 20e6
+
+
+def test_gui_log_button_click(app):
+    from types import SimpleNamespace as Ev
+    button = app.capture_button
+    assert str(button.cget("state")) == "disabled"      # no location yet
+    button._on_release(Ev(x=5, y=5))
+    assert not app.busy
+    app.x_var.set("0.3")
+    app.y_var.set("0.5")
+    assert str(button.cget("state")) == "normal"
+    button.update()
+    button._on_release(Ev(x=5, y=5))                    # click inside: logs
+    assert app.busy
+    pump(app, lambda: not app.busy)
+    assert app.session.trials[-1]["kind"] == "load"
+
+
+def test_gui_post_grid_view_and_median(app):
+    app.post.set(True)
+    app._on_post_toggle()
+    win = app.post_window
+    t = np.arange(5000) / 1000.0
+    data = np.full((5000, 12), 100.0)                   # big offsets everywhere
+    data[:, 8] += 3.0 * np.sin(2 * np.pi * 41 * t)      # 3Z rings, amplitude 3
+    win.show(data, 1000.0, "synthetic", "newtons")
+
+    win.view.set("grid")
+    win._redraw()
+    axes = win.figure.axes
+    assert len(axes) == 16 and len(win.stats) == 16
+    assert all(ax.get_ylim() == axes[0].get_ylim() for ax in axes)   # one scale
+    assert all(l.get_visible() for l in win.lines.values())          # grid shows all 16
+    assert win.stats["3Z"].get_text() == f"rms {3 / np.sqrt(2):.3g} N"
+    assert win.stats["1Z"].get_text() == "rms 0 N"
+
+    win.median.set(True)                                # every trace to zero
+    win._redraw()
+    assert abs(np.median(win.lines["1X"].get_data()[1])) < 1e-9
+    assert axes[0].get_ylim()[1] < 10                   # offsets gone, ring fills the scale
+    win.ax.set_xlim(1.0, 2.0)                           # zoom: stats and spectra follow
+    win._update_range()
+    assert "1.00 s analysed" in win.spec_axes[-1].get_xlabel()
+    win.close()
+    assert app.settings["post_view"] == "grid" and app.settings["post_median"] is True
+
+
+def test_load_capture_uses_the_session(tmp_path):
+    import forceplate_gui as gui
+    layout = fp.load_layout()
+    session = fp.Session.create(tmp_path / "s", 1.6, 0.6)
+    session.add_trial(np.full((100, 12), 0.5), 1000.0, "tare")
+    fields = fp.load_trial_entry("down", 0.3, 0.5, 0.0, 98.0)
+    session.add_trial(np.full((100, 12), 0.7), 1000.0, "load", notes="strike 3", **fields)
+    data, rate, title, unit = gui.load_capture(session.folder / "trial_002.csv", layout)
+    assert rate == pytest.approx(1000.0)
+    assert "trial_002.csv" in title and "strike 3" in title
+    assert "NOT TARED" not in unit
+    np.testing.assert_allclose(data, 0.2 * layout.newtons_per_volt * np.ones((100, 12)), atol=1e-6)
+
+    lone = tmp_path / "loose.csv"                       # no session.json beside it
+    fp.save_capture_csv(lone, np.zeros((50, 12)), 500.0)
+    data, rate, title, unit = gui.load_capture(lone, layout)
+    assert rate == pytest.approx(500.0) and "NOT TARED" in unit
+    (tmp_path / "bad.csv").write_text("a,b\n1,2\n3,4\n")
+    with pytest.raises(ValueError, match="12 channels"):
+        gui.load_capture(tmp_path / "bad.csv", layout)
+
+
+def test_gui_load_data_default_folder_and_viewer(app, monkeypatch, tmp_path):
+    import datetime as dt
+    import forceplate_gui as gui
+    app.data_dir = tmp_path / "data"
+    app.data_dir.mkdir()
+    old = app.data_dir / "20250101-120000"
+    old.mkdir()
+    assert app._load_dir() == app.data_dir              # nothing today, nothing remembered
+    app.settings["last_load_dir"] = str(old)
+    assert app._load_dir() == old                       # the one opened last time
+    today = app.data_dir / f"{dt.date.today():%Y%m%d}-093000"
+    today.mkdir()
+    assert app._load_dir() == today                     # today's session wins
+
+    fp.save_capture_csv(old / "trial_001.csv", np.zeros((300, 12)), 1000.0)
+    asked = {}
+    def fake_dialog(**kw):
+        asked.update(kw)
+        return str(old / "trial_001.csv")
+    monkeypatch.setattr(gui.filedialog, "askopenfilename", fake_dialog)
+    app._load_data()
+    assert asked["initialdir"] == str(today)
+    assert app.post_window is not None and app.post.get()
+    assert app.post_window.data.shape == (300, 12)
+    assert app.settings["last_load_dir"] == str(old)
+    assert app.session is None                          # viewing never touches a session
+    app.post_window.close()

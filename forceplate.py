@@ -82,7 +82,8 @@ AI_LOW, AI_HIGH = 0, 11
 
 # --- Capture settings ---
 SAMPLE_RATE = 1000.0      # scans per second, all 12 channels each scan
-CAPTURE_SECONDS = 5.0
+CAPTURE_SECONDS = 5.0     # default length of a capture; the GUI can change it
+MAX_CAPTURE_SECONDS = 120.0   # 120 s = 1.44 M samples: ~12 MB in memory, ~15 MB of CSV
 GRAVITY = 9.80665         # m/s^2, to turn calibration masses into newtons
 
 # --- Load directions: unit vector of the force applied to the deck ---
@@ -184,7 +185,7 @@ class Session:
             entered = t.get("entered", {})
             rows.append({
                 "id": t["id"], "date": when.date().isoformat(), "time": when.time().isoformat(),
-                "kind": t["kind"], "file": t["file"],
+                "kind": t["kind"], "file": t["file"], "seconds": t.get("seconds", ""),
                 "direction": t.get("direction", ""),
                 "load": entered.get("load", ""), "load_unit": entered.get("load_unit", ""),
                 "force_N": _fmt(t.get("force_n")),
@@ -221,6 +222,7 @@ class Session:
             "file": filename,
             "time": dt.datetime.now().isoformat(timespec="seconds"),
             "rate_hz": rate,
+            "seconds": round(len(volts) / rate, 3),
             "mean_v": [round(v, 6) for v in volts.mean(axis=0)],
             "std_v": [round(v, 6) for v in volts.std(axis=0)],
         }
@@ -253,7 +255,7 @@ class Session:
 
 
 LOG_NAME = "captures_log.csv"
-LOG_COLUMNS = ["id", "date", "time", "kind", "file", "direction", "load", "load_unit",
+LOG_COLUMNS = ["id", "date", "time", "kind", "file", "seconds", "direction", "load", "load_unit",
                "force_N", "right_of_left_edge", "back_from_front_edge", "below_deck",
                "length_unit", "x_m", "y_m", "z_m", "deck_side_to_side_m",
                "deck_front_to_back_m", "tare_id", "noisiest_std_mV", "notes"]
@@ -445,6 +447,23 @@ def cop_from_cells(forces: np.ndarray, layout: Layout,
         return None
     x, y = fz @ layout.positions / total
     return float(x), float(y), float(total)
+
+
+def cell_norm_spectrum(data: np.ndarray, rate: float, nfft: int | None = None
+                       ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Amplitude spectrum of each load cell, (samples, 12) -> (freqs, 4): at each
+    frequency the norm sqrt(|X|^2 + |Y|^2 + |Z|^2). Taking the norm per
+    frequency, not per sample, keeps modes at their own frequency (a norm of
+    the time signal rectifies it and doubles them). Mean removed, Hann window,
+    so the result does not depend on the tare.
+    """
+    seg = data - data.mean(axis=0)
+    w = np.hanning(len(seg))[:, None]
+    nfft = nfft or max(len(seg), 4096)
+    spec = np.fft.rfft(seg * w, nfft, axis=0) * 2 / w.sum()
+    norms = np.sqrt((np.abs(spec.reshape(len(spec), 4, 3)) ** 2).sum(axis=2))
+    return np.fft.rfftfreq(nfft, 1 / rate), norms
 
 
 def report(fit: Fit):
