@@ -608,10 +608,7 @@ class App(tk.Tk):
         except (OSError, ValueError) as e:
             messagebox.showerror("Load data", f"Could not read {path.name}:\n{e}")
             return
-        if self.post_window is None:
-            self.post.set(True)
-            self._on_post_toggle()
-        self.post_window.show(*shown)
+        self._open_post_window().show(*shown)
         self.post_window.lift()
         self._set_status(f"Viewing {path.parent.name}/{path.name} in the Plot Results window.")
 
@@ -845,8 +842,9 @@ class App(tk.Tk):
         self.live_check = ttk.Checkbutton(views, text="Live view", variable=self.live,
                                           command=self._on_live_toggle)
         self.live_check.pack(side="left")
-        self.post = tk.BooleanVar(value=False)
-        ttk.Checkbutton(views, text="Plot Results", variable=self.post,
+        # Ticked: each finished log opens (or updates) the Plot Results window.
+        self.post = tk.BooleanVar(value=bool(self.settings.get("post_after_log", True)))
+        ttk.Checkbutton(views, text="Show results after logging", variable=self.post,
                         command=self._on_post_toggle).pack(side="left", padx=(16, 0))
 
         buttons = ttk.Frame(main)
@@ -1230,7 +1228,7 @@ class App(tk.Tk):
         if kind == "tare":
             self.zero_v = volts.mean(axis=0)
         self._refresh_trials()
-        self._show_trial(entry, volts)
+        self._show_trial(entry, volts, just_logged=True)
         self._redraw_deck()
         # Live view goes back to how it was before the capture (the capture
         # stays in the post window, and in the plots until live redraws them).
@@ -1372,8 +1370,12 @@ class App(tk.Tk):
             if self.session and trial_id is not None else None
         return np.array(t["mean_v"]) if t else None
 
-    def _show_trial(self, t: dict, volts: np.ndarray):
-        """Plot a saved capture, tared by its own tare (a load) or the latest one."""
+    def _show_trial(self, t: dict, volts: np.ndarray, just_logged: bool = False):
+        """
+        Plot a saved capture, tared by its own tare (a load) or the latest one.
+        A load just logged also opens Plot Results when "Show results after
+        logging" is ticked; otherwise only an open Plot Results window follows.
+        """
         zero = self._trial_mean_v(t.get("tare_id")) if t["kind"] == "load" else None
         if zero is None:
             zero = self.zero_v
@@ -1391,27 +1393,28 @@ class App(tk.Tk):
         if t.get("notes"):
             title += f"   ({t['notes']})"
         self.post_data = (data, t["rate_hz"], title, unit)
+        if just_logged and t["kind"] != "tare" and self.post.get():
+            self._open_post_window()
         if self.post_window is not None:
             self.post_window.show(*self.post_data)
 
     # -- post window ------------------------------------------------------------
-    def _on_post_toggle(self):
-        if self.post.get() and self.post_window is None:
+    def _open_post_window(self) -> PostWindow:
+        if self.post_window is None:
             checked = self.settings.get("post_checked", [f"{c}|F|" for c in "1234"])
             self.post_window = PostWindow(self, checked, self._on_post_closed,
                                           view=self.settings.get("post_view", "grid"),
                                           median=bool(self.settings.get("post_median", True)))
-            if self.post_data is not None:
-                self.post_window.show(*self.post_data)
-        elif not self.post.get() and self.post_window is not None:
-            self.post_window.close()
+        return self.post_window
+
+    def _on_post_toggle(self):
+        self._save_settings(post_after_log=self.post.get())
 
     def _on_post_closed(self):
         w = self.post_window
         self._save_settings(post_checked=w.checked(), post_view=w.view.get(),
                             post_median=w.median.get())
         self.post_window = None
-        self.post.set(False)
 
     # -- session list ---------------------------------------------------------
     def _describe(self, t: dict) -> str:

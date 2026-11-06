@@ -184,8 +184,9 @@ moves. It is worked out only from the four Z forces and where the cells sit,
 before any calibration, so it's a sanity check: a weight placed on the deck
 should land close to its red marker.
 
-**Plot Results** (tick box) opens a second window showing the latest log, or the
-trial you click in Details ▸ Session. Zoom with the toolbar's magnifier, pan with
+**Show results after logging** (tick box, on by default) opens the Plot Results
+window each time a log finishes. Ticking it doesn't open anything by itself. While
+the window is open it also follows the trial you click in Details ▸ Session. Zoom with the toolbar's magnifier, pan with
 the cross, and go back with the house. It opens in the **grid** view: all 16
 traces (each cell's X, Y, Z and |F|, the length of its force vector) on one
 scale, each minus its own median so every trace sits at zero, with the rms of
@@ -312,7 +313,10 @@ says *S* mV/V at a rated load of *F* newtons:
 newtons_per_volt = F / (2.01 × S)
 ```
 A load pressing down should read as positive Z; if it reads negative, make that
-cell's Z number negative. The numbers in the file now are **placeholders**, and
+cell's Z number negative. The file now has **1660 N/V on every axis**, from what
+we believe the cells are: 4 mV/V, rated 3000 lbf (13345 N), so about 8 V out at
+the rated load, inside the DAQ's ±10 V. These are still unchecked against the
+sheets (X and Y may be rated differently from Z), so they count as **placeholders**, and
 the line under the **Log** button says "placeholder scale" until you set `"scale_is_placeholder": false`.
 
 # Wiring reference

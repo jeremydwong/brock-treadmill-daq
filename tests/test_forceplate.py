@@ -476,10 +476,25 @@ def test_gui_live_view_comes_back_after_a_log(app):
     app._on_live_toggle()
 
 
-def test_gui_post_window(app):
-    app.post.set(True)
+def test_gui_show_results_after_logging(app):
+    assert app.post.get()                              # on by default
+    assert app.post_window is None                     # ticking it shows nothing yet
+    capture(app, "tare")
+    assert app.post_window is None                     # a tare is not a result
+    app.x_var.set("0.3")
+    app.y_var.set("0.5")
+    capture(app, "load")
+    assert app.post_window is not None                 # the log just finished: shown
+    app.post_window.close()
+    app.post.set(False)
     app._on_post_toggle()
-    win = app.post_window
+    assert app.settings["post_after_log"] is False     # remembered
+    capture(app, "load")
+    assert app.post_window is None
+
+
+def test_gui_post_window(app):
+    win = app._open_post_window()
     assert win is not None and len(win.vars) == 16
     assert win.view.get() == "grid" and win.median.get()           # defaults
     assert win.checked() == ["1|F|", "2|F|", "3|F|", "4|F|"]      # overlay default: the norms
@@ -506,8 +521,8 @@ def test_gui_post_window(app):
     app._on_trial_select(None)
     assert win.ax.get_title().startswith("#1 tare")
 
-    win.close()                                        # closing the window unticks the box
-    assert app.post_window is None and not app.post.get()
+    win.close()
+    assert app.post_window is None
     assert app.settings["post_checked"] == ["1Z", "2Z", "3Z", "4Z"]   # remembered
     assert app.settings["post_view"] == "overlay"
 
@@ -560,9 +575,7 @@ def test_gui_log_length(app, monkeypatch):
 
 
 def test_gui_post_window_spectra_follow_the_zoom(app):
-    app.post.set(True)
-    app._on_post_toggle()
-    win = app.post_window
+    win = app._open_post_window()
     # A 41 Hz ring on cell 3 (all three axes) and 28 Hz on cell 1, in newtons
     t = np.arange(5000) / 1000.0
     data = np.zeros((5000, 12))
@@ -605,9 +618,7 @@ def test_gui_log_button_click(app):
 
 
 def test_gui_post_grid_view_and_median(app):
-    app.post.set(True)
-    app._on_post_toggle()
-    win = app.post_window
+    win = app._open_post_window()
     t = np.arange(5000) / 1000.0
     data = np.full((5000, 12), 100.0)                   # big offsets everywhere
     data[:, 8] += 3.0 * np.sin(2 * np.pi * 41 * t)      # 3Z rings, amplitude 3
@@ -676,7 +687,7 @@ def test_gui_load_data_default_folder_and_viewer(app, monkeypatch, tmp_path):
     monkeypatch.setattr(gui.filedialog, "askopenfilename", fake_dialog)
     app._load_data()
     assert asked["initialdir"] == str(today)
-    assert app.post_window is not None and app.post.get()
+    assert app.post_window is not None
     assert app.post_window.data.shape == (300, 12)
     assert app.settings["last_load_dir"] == str(old)
     assert app.session is None                          # viewing never touches a session

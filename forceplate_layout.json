@@ -11,6 +11,9 @@
     "has gain 201 and 10 V excitation, so a sheet giving S mV/V at a rated load of F newtons means",
     "newtons_per_volt = F / (2.01 * S). Flip the sign of Z if pressing down reads negative: the",
     "GUI wants a load pressing down on the deck to be positive Z.",
+    "NOW: 1660 on every axis, from what we believe the cells are: 4 mV/V, rated 3000 lbf",
+    "(13345 N), so 40 mV and 8.04 V out at the rated load: 13345 / (2.01 * 4) = 1660.",
+    "Not yet checked against the sheets, and X/Y may be rated differently from Z.",
     "Set scale_is_placeholder to false once the real numbers are in."
   ],
   "deck": {"width_m": 0.6, "length_m": 1.6},
@@ -18,12 +21,12 @@
   "scale_is_placeholder": true,
   "load_cells": {
     "1": {"where": "front left",  "x_m": 0.05, "y_m": 0.05,
-          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+          "newtons_per_volt": {"X": 1660, "Y": 1660, "Z": 1660}},
     "2": {"where": "front right", "x_m": 0.55, "y_m": 0.05,
-          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+          "newtons_per_volt": {"X": 1660, "Y": 1660, "Z": 1660}},
     "3": {"where": "back right",  "x_m": 0.55, "y_m": 1.55,
-          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}},
+          "newtons_per_volt": {"X": 1660, "Y": 1660, "Z": 1660}},
     "4": {"where": "back left",   "x_m": 0.05, "y_m": 1.55,
-          "newtons_per_volt": {"X": 1244, "Y": 1244, "Z": 1244}}
+          "newtons_per_volt": {"X": 1660, "Y": 1660, "Z": 1660}}
   }
 }
