@@ -946,7 +946,8 @@ class App(tk.Tk):
         for i, cell in enumerate("1234"):
             x, y = lay.positions[i]
             npv = lay.newtons_per_volt[3 * i:3 * i + 3]
-            lines.append(f"  cell {cell} ({lay.where[cell]}) on amplifier input {cell}: "
+            serial = f" {lay.serials[cell]}" if lay.serials.get(cell) else ""
+            lines.append(f"  cell {cell}{serial} ({lay.where[cell]}) on amplifier input {cell}: "
                          f"{x:g} m right, {y:g} m back; "
                          + ", ".join(f"{a} {v:g}" for a, v in zip("XYZ", npv)) + " N/V")
         if lay.placeholder:
@@ -1219,7 +1220,8 @@ class App(tk.Tk):
             if self.session is None:
                 folder = self.data_dir / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
                 info = {"product": self.daq.product_name, "serial": self.daq.serial}
-                self.session = fp.Session.create(folder, self.deck_length, self.deck_width, info)
+                self.session = fp.Session.create(folder, self.deck_length, self.deck_width, info,
+                                                layout=self.layout)
             entry = self.session.add_trial(volts, rate, kind, **fields)
         except Exception as e:
             self._save_failed(e, volts, rate)
@@ -1620,6 +1622,7 @@ def load_capture(path: Path, layout: fp.Layout) -> tuple[np.ndarray, float, str,
                 title += f"   ({entry['notes']})"
     if entry is not None and entry.get("kind") == "loopback":
         return volts, rate, title, "volts"
+    layout = fp.session_layout(path.parent, layout)
     unit = "newtons" + ("" if zero is not None else " (NOT TARED)")
     if layout.placeholder:
         unit += ", placeholder scale"

@@ -54,7 +54,7 @@ import datetime as dt
 import io
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -128,7 +128,7 @@ class Session:
 
     @classmethod
     def create(cls, folder: Path, deck_length_m: float, deck_width_m: float,
-               daq_info: dict | None = None) -> "Session":
+               daq_info: dict | None = None, layout: "Layout | None" = None) -> "Session":
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=False)
         meta = {
@@ -144,6 +144,8 @@ class Session:
             "daq": daq_info or {},
             "channels": [{"signal": s, "ai_channel": c, "terminal": t} for s, c, t in CHANNELS],
             "directions": {k: list(v) for k, v in DIRECTIONS.items()},
+            # Which serial was on which input, and the scales, when this was recorded
+            "layout": layout.raw if layout is not None else None,
             "trials": [],
         }
         session = cls(folder, meta)
@@ -410,11 +412,14 @@ class Layout:
     newtons_per_volt: np.ndarray    # (12,) in SIGNAL_NAMES order
     placeholder: bool               # True until the calibration-sheet numbers are in
     path: Path
+    serials: dict[str, str] = field(default_factory=dict)    # cell "1".."4" -> "TR3D-A-3K 401"
+    # (4, 3, 3): per cell, the inverse of its sheet's crosstalk matrix (identity if none)
+    uncross: np.ndarray = field(default_factory=lambda: np.tile(np.eye(3), (4, 1, 1)))
+    raw: dict = field(default_factory=dict)                   # the file as read, for sessions
 
 
-def load_layout(path: Path = LAYOUT_FILE) -> Layout:
-    """Read forceplate_layout.json (see the "about" lines in it)."""
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+def parse_layout(raw: dict, path: Path) -> Layout:
+    """A layout from the contents of forceplate_layout.json (or a session's copy of it)."""
     cells = raw["load_cells"]
     ids = ["1", "2", "3", "4"]
     return Layout(
@@ -426,12 +431,43 @@ def load_layout(path: Path = LAYOUT_FILE) -> Layout:
                                   dtype=float),
         placeholder=bool(raw.get("scale_is_placeholder", False)),
         path=Path(path),
+        serials={c: cells[c].get("serial", "") for c in ids},
+        uncross=np.array([np.linalg.inv(np.array(cells[c].get("crosstalk", np.eye(3)), dtype=float))
+                          for c in ids]),
+        raw=raw,
     )
 
 
+def load_layout(path: Path = LAYOUT_FILE) -> Layout:
+    """Read forceplate_layout.json (see the "about" lines in it)."""
+    return parse_layout(json.loads(Path(path).read_text(encoding="utf-8")), path)
+
+
+def session_layout(folder: Path, default: Layout) -> Layout:
+    """
+    The layout a session was recorded with: the copy in its session.json, so a
+    later rewiring or new scale doesn't silently change old data. Sessions from
+    before that copy was kept get `default`.
+    """
+    try:
+        raw = json.loads((Path(folder) / "session.json").read_text(encoding="utf-8")).get("layout")
+    except (OSError, ValueError):
+        raw = None
+    return parse_layout(raw, Path(folder) / "session.json") if raw else default
+
+
 def cell_forces(volts: np.ndarray, zero: np.ndarray | None, layout: Layout) -> np.ndarray:
-    """Volts (..., 12) -> newtons (..., 12), each cell in its own axes. No zero: untared."""
-    return (volts - (0.0 if zero is None else zero)) * layout.newtons_per_volt
+    """
+    Volts (..., 12) -> newtons (..., 12), each cell in its own axes. No zero: untared.
+    Each channel is scaled by its own N/V, then each cell's three readings are
+    corrected for crosstalk with the inverse of its sheet's matrix (worked on
+    magnitudes, so a negative N/V only flips the axis afterwards).
+    """
+    npv = layout.newtons_per_volt
+    read = (volts - (0.0 if zero is None else zero)) * np.abs(npv)
+    read = read.reshape(*read.shape[:-1], 4, 3)
+    true = np.einsum("cij,...cj->...ci", layout.uncross, read)
+    return true.reshape(*true.shape[:-2], 12) * np.sign(npv)
 
 
 def cop_from_cells(forces: np.ndarray, layout: Layout,

@@ -305,7 +305,7 @@ def main():
         parser.error("no trials given and none have 'strike' in their notes")
     out_dir = args.out or args.session / "strike_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
-    layout = fp.load_layout()
+    layout = fp.session_layout(args.session, fp.load_layout())
     unit = "N, placeholder scale" if layout.placeholder else "N"
     if layout.placeholder:
         print(f"Note: {layout.path.name} still has placeholder scales; newtons are only relative.")

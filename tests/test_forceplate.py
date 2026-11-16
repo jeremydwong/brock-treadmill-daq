@@ -150,6 +150,52 @@ def test_loads_without_tare_are_skipped(tmp_path):
     assert ids == []
 
 
+def plain_layout(npv: float = 1000.0) -> fp.Layout:
+    """The real positions, with one scale on every channel and no crosstalk: for geometry tests."""
+    raw = json.loads(fp.LAYOUT_FILE.read_text(encoding="utf-8"))
+    for cell in raw["load_cells"].values():
+        cell["newtons_per_volt"] = {a: npv for a in "XYZ"}
+        cell.pop("crosstalk", None)
+    return fp.parse_layout(raw, fp.LAYOUT_FILE)
+
+
+def test_layout_holds_the_calibration_sheets():
+    layout = fp.load_layout()
+    assert not layout.placeholder
+    assert layout.serials == {"1": "TR3D-A-3K 401", "2": "TR3D-A-3K 402",
+                              "3": "TR3D-A-3K 405", "4": "TR3D-A-3K 406"}
+    # 401's sheet: 1 mV/V = 3692.1 N on X; at 10 V excitation x gain 201 that is 3692.1 / 2.01 N/V
+    assert layout.newtons_per_volt[fp.SIGNAL_NAMES.index("1X")] == pytest.approx(3692.1 / 2.01, abs=0.1)
+    # A pure 1000 N vertical load on cell 1, as its channels would read it with
+    # crosstalk (sheet: X reads +0.745%, Y -0.723% of a Z load), comes back pure.
+    cross = np.array(layout.raw["load_cells"]["1"]["crosstalk"])
+    volts = np.zeros(12)
+    volts[:3] = cross @ [0.0, 0.0, 1000.0] / layout.newtons_per_volt[:3]
+    assert volts[0] != 0 and volts[1] != 0
+    np.testing.assert_allclose(fp.cell_forces(volts, None, layout)[:3], [0, 0, 1000], atol=1e-9)
+
+
+def test_negative_scale_flips_only_that_axis():
+    layout = plain_layout()
+    layout.newtons_per_volt[2] = -1000.0                 # 1Z wired upside down
+    volts = np.zeros(12)
+    volts[2] = 0.5
+    f = fp.cell_forces(volts, None, layout)
+    assert f[2] == pytest.approx(-500.0) and not f[[0, 1, 3, 4, 5]].any()
+
+
+def test_session_keeps_the_layout_it_was_recorded_with(tmp_path):
+    layout = fp.load_layout()
+    session = fp.Session.create(tmp_path / "s", 1.6, 0.6, layout=layout)
+    meta = json.loads((session.folder / "session.json").read_text(encoding="utf-8"))
+    assert meta["layout"]["load_cells"]["3"]["serial"] == "TR3D-A-3K 405"
+    other = plain_layout(1.0)
+    kept = fp.session_layout(session.folder, other)
+    np.testing.assert_allclose(kept.newtons_per_volt, layout.newtons_per_volt)
+    old = fp.Session.create(tmp_path / "old", 1.6, 0.6)  # recorded before sessions kept one
+    assert fp.session_layout(old.folder, other) is other
+
+
 def test_layout_file_matches_channel_order():
     layout = fp.load_layout()
     assert layout.positions.shape == (4, 2) and layout.newtons_per_volt.shape == (12,)
@@ -160,7 +206,7 @@ def test_layout_file_matches_channel_order():
 
 
 def test_cop_from_cell_geometry():
-    layout = fp.load_layout()
+    layout = plain_layout()
     zero = np.full(12, 0.3)
     z = [fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]
     # Equal volts on all four Z channels: the middle of the four cells.
@@ -322,10 +368,11 @@ def test_gui_cop_from_live_volts(app):
     capture(app, "tare")                                   # fake reads 0 V everywhere
     assert app.zero_v is not None and app.cop is None
     volts = np.zeros(12)
-    volts[[fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]] = [0.1, 0.1, 0.3, 0.3]
+    z = [fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]
+    volts[z] = [0.1, 0.1, 0.3, 0.3]
     app._show_cop(volts, app.zero_v, "Live")
-    pos = app.layout.positions
-    expected = (pos * np.array([[0.1], [0.1], [0.3], [0.3]])).sum(axis=0) / 0.8
+    fz = fp.cell_forces(volts, app.zero_v, app.layout)[z]       # each cell's own scale
+    expected = (app.layout.positions * fz[:, None]).sum(axis=0) / fz.sum()
     assert app.cop == pytest.approx(tuple(expected))
     assert app.canvas.find_withtag("cop")                  # drawn on the deck
     app._redraw_deck()
@@ -645,7 +692,7 @@ def test_gui_post_grid_view_and_median(app):
 
 def test_load_capture_uses_the_session(tmp_path):
     import forceplate_gui as gui
-    layout = fp.load_layout()
+    layout = plain_layout()
     session = fp.Session.create(tmp_path / "s", 1.6, 0.6)
     session.add_trial(np.full((100, 12), 0.5), 1000.0, "tare")
     fields = fp.load_trial_entry("down", 0.3, 0.5, 0.0, 98.0)

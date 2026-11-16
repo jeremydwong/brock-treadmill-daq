@@ -306,18 +306,24 @@ out on wire bundle *N* as NX, NY, NZ:
 left edge** and `y_m` how far **back from the front edge**, in metres, measured
 from the deck's front-left corner. The deck size there is the app's default.
 
-**Scale.** `newtons_per_volt` is per axis and comes from each load cell's
-calibration sheet. The amplifier has gain 201 and 10 V excitation, so if a sheet
-says *S* mV/V at a rated load of *F* newtons:
+**Scale.** Each cell has its Michigan Scientific serial (`TR3D-A-3K 401` …) and
+the numbers from that serial's calibration sheet. `newtons_per_volt` is per axis. The
+amplifier has gain 201 and 10 V excitation, so if a sheet says "1 mV/V = *L* N":
 ```
-newtons_per_volt = F / (2.01 × S)
+newtons_per_volt = L / 2.01
 ```
-A load pressing down should read as positive Z; if it reads negative, make that
-cell's Z number negative. The file now has **1660 N/V on every axis**, from what
-we believe the cells are: 4 mV/V, rated 3000 lbf (13345 N), so about 8 V out at
-the rated load, inside the DAQ's ±10 V. These are still unchecked against the
-sheets (X and Y may be rated differently from Z), so they count as **placeholders**, and
-the line under the **Log** button says "placeholder scale" until you set `"scale_is_placeholder": false`.
+`crosstalk` is the sheet's crosstalk as a fraction: rows are what the X, Y, Z
+channels read, and columns are the load applied on X, Y, Z. The app undoes it for
+each cell. A load pressing down should read as positive Z; if it reads negative,
+make that cell's Z number negative.
+
+Each new session saves a copy of this file in its `session.json`. If cells are
+rewired or rescaled later, old sessions still open with the wiring and scales
+they were recorded with. The captures themselves are always raw volts.
+
+**If you move a cable or swap a load cell**, update `serial` (and its numbers) for
+that input before recording. In the two Nov 4, 2026 sessions, inputs 3 and 4 were
+swapped compared with this file.
 
 # Wiring reference
 
