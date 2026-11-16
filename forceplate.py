@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Force-plate calibration: shared definitions, session files and the fit.
+Force-plate sessions: shared definitions, capture files, units and spectra.
 
 The treadmill deck sits on four 3-axis load cells (1-4), each giving X, Y and
 Z voltages: 12 signals in all. A calibration session is a folder holding
@@ -26,9 +26,10 @@ Forces are in newtons and moments in newton-metres about the deck frame origin.
 The first three rows alone are the force-only calibration; the moments are
 what let you compute centre of pressure.
 
-Before there is a fit, forceplate_layout.json gives a rough answer: where each
-cell sits and its newtons per volt from its calibration sheet. That is enough
-to show each cell's force and a centre of pressure from the four Z forces.
+Everything that turns volts into newtons (the calibration sheets, which
+serial is on which input, forceplate_layout.json, and this fit) is in
+loadcell_cal.py. Before there is a fit, each cell's sheet is enough to show
+its force and a centre of pressure from the four Z forces.
 
 Deck frame (seen from above, standing on the belt facing forward; right-handed,
 the same convention as AMTI and Bertec force plates):
@@ -43,18 +44,16 @@ A direction such as "left" is the direction the applied force pushes the deck.
 
 Usage:
   uv run forceplate_gui.py                       # collect a session
-  uv run forceplate.py "<data folder>/<session>" # solve for C
+  uv run forceplate.py "<data folder>/<session>" # solve for C (same as loadcell_cal.py --fit)
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import datetime as dt
 import io
 import json
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -103,20 +102,10 @@ FORCE_UNITS = {"kg": GRAVITY, "lb": 0.45359237 * GRAVITY,     # newtons per unit
                "N": 1.0, "lbf": 4.4482216152605}
 MASS_UNITS = {"kg": 1.0, "lb": 0.45359237}                    # kg per unit
 
-LOAD_NAMES = ["Fx", "Fy", "Fz", "Mx", "My", "Mz"]
-LOAD_UNITS = ["N", "N", "N", "N·m", "N·m", "N·m"]
-
 
 # ---------------------------------------------------------------------------
 # Session files
 # ---------------------------------------------------------------------------
-
-def known_load(direction: str, force_n: float, x: float, y: float, z: float) -> np.ndarray:
-    """[Fx, Fy, Fz, Mx, My, Mz] for a force of `force_n` newtons applied at (x, y, z)."""
-    f = force_n * np.asarray(DIRECTIONS[direction])
-    m = np.cross([x, y, z], f)
-    return np.concatenate([f, m])
-
 
 class Session:
     """A folder of trial CSVs plus session.json describing them."""
@@ -128,7 +117,7 @@ class Session:
 
     @classmethod
     def create(cls, folder: Path, deck_length_m: float, deck_width_m: float,
-               daq_info: dict | None = None, layout: "Layout | None" = None) -> "Session":
+               daq_info: dict | None = None, layout=None) -> "Session":
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=False)
         meta = {
@@ -297,6 +286,7 @@ def load_trial_entry(direction: str, x: float, y: float, z: float, force_n: floa
     The fields the GUI stores for a load capture. (x, y, z) in metres in the deck
     frame; `entered` keeps what the person typed (values and units) for the log.
     """
+    from loadcell_cal import known_load
     entry = {
         "direction": direction,
         "unit_vector": list(DIRECTIONS[direction]),
@@ -309,180 +299,6 @@ def load_trial_entry(direction: str, x: float, y: float, z: float, force_n: floa
         if entered.get("load_unit") in MASS_UNITS:
             entry["mass_kg"] = float(entered["load"]) * MASS_UNITS[entered["load_unit"]]
     return entry
-
-
-# ---------------------------------------------------------------------------
-# Fit
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Fit:
-    matrix: np.ndarray          # (6, 12): loads = matrix @ tared volts
-    trial_ids: list[int]
-    signals: np.ndarray         # (K, 12) tared mean volts per load trial
-    known: np.ndarray           # (K, 6)
-    rank: int
-    singular_values: np.ndarray
-
-    @property
-    def predicted(self) -> np.ndarray:
-        return self.signals @ self.matrix.T
-
-    @property
-    def rms_error(self) -> np.ndarray:
-        return np.sqrt(np.mean((self.predicted - self.known) ** 2, axis=0))
-
-
-def gather(session: Session) -> tuple[list[int], np.ndarray, np.ndarray]:
-    """Tared signal means and known loads for every load trial that has a tare."""
-    by_id = {t["id"]: t for t in session.trials}
-    tare_means: dict[int, np.ndarray] = {}
-    ids, rows, known = [], [], []
-    for entry in session.trials:
-        if entry["kind"] != "load":
-            continue
-        tare_id = entry.get("tare_id")
-        if tare_id is None or tare_id not in by_id:
-            print(f"  skipping trial {entry['id']}: no tare recorded before it")
-            continue
-        if tare_id not in tare_means:
-            tare_means[tare_id] = session.trial_mean(by_id[tare_id])
-        ids.append(entry["id"])
-        rows.append(session.trial_mean(entry) - tare_means[tare_id])
-        known.append(known_load(entry["direction"], entry["force_n"],
-                                entry["x_m"], entry["y_m"], entry["z_m"]))
-    return ids, np.array(rows).reshape(-1, 12), np.array(known).reshape(-1, 6)
-
-
-def fit_calibration(trial_ids: list[int], signals: np.ndarray, known: np.ndarray) -> Fit:
-    """
-    Least-squares C such that known ~= signals @ C.T.
-
-    Each row of C is solved independently from the same K x 12 signal matrix, so
-    every load component needs at least 12 trials that move the 12 signals in
-    independent ways. Below that the solution is the minimum-norm one, and the
-    reported rank says how far short it is.
-    """
-    ct, _, rank, sv = np.linalg.lstsq(signals, known, rcond=None)
-    return Fit(ct.T, trial_ids, signals, known, int(rank), sv)
-
-
-def save_fit(fit: Fit, session: Session) -> tuple[Path, Path]:
-    json_path = session.folder / "calibration.json"
-    csv_path = session.folder / "calibration_matrix.csv"
-    _write_atomic(json_path, json.dumps({
-        "created": dt.datetime.now().isoformat(timespec="seconds"),
-        "session": str(session.folder),
-        "equation": "[Fx,Fy,Fz,Mx,My,Mz] = matrix @ (volts - tare_volts)",
-        "frame": session.meta["deck"]["frame"],
-        "rows": LOAD_NAMES,
-        "row_units": LOAD_UNITS,
-        "columns": SIGNAL_NAMES,
-        "matrix": fit.matrix.tolist(),
-        "trial_ids": fit.trial_ids,
-        "rank": fit.rank,
-        "rms_error": dict(zip(LOAD_NAMES, fit.rms_error.tolist())),
-    }, indent=2))
-    header = "load," + ",".join(SIGNAL_NAMES)
-    lines = [header] + [f"{name}," + ",".join(f"{v:.6g}" for v in row)
-                        for name, row in zip(LOAD_NAMES, fit.matrix)]
-    _write_atomic(csv_path, "\n".join(lines) + "\n")
-    return json_path, csv_path
-
-
-def centre_of_pressure(load: np.ndarray) -> tuple[float, float]:
-    """(x, y) on the deck surface where a pure force would give these moments."""
-    fz, mx, my = load[2], load[3], load[4]
-    return -my / fz, mx / fz
-
-
-# ---------------------------------------------------------------------------
-# Load-cell layout: positions and per-channel scale, before any fit
-# ---------------------------------------------------------------------------
-
-LAYOUT_FILE = Path(__file__).with_name("forceplate_layout.json")
-
-
-@dataclass
-class Layout:
-    deck_length_m: float
-    deck_width_m: float
-    where: dict[str, str]           # cell "1".."4" -> "front left", ...
-    positions: np.ndarray           # (4, 2) x, y in metres, cells 1..4
-    newtons_per_volt: np.ndarray    # (12,) in SIGNAL_NAMES order
-    placeholder: bool               # True until the calibration-sheet numbers are in
-    path: Path
-    serials: dict[str, str] = field(default_factory=dict)    # cell "1".."4" -> "TR3D-A-3K 401"
-    # (4, 3, 3): per cell, the inverse of its sheet's crosstalk matrix (identity if none)
-    uncross: np.ndarray = field(default_factory=lambda: np.tile(np.eye(3), (4, 1, 1)))
-    raw: dict = field(default_factory=dict)                   # the file as read, for sessions
-
-
-def parse_layout(raw: dict, path: Path) -> Layout:
-    """A layout from the contents of forceplate_layout.json (or a session's copy of it)."""
-    cells = raw["load_cells"]
-    ids = ["1", "2", "3", "4"]
-    return Layout(
-        deck_length_m=float(raw["deck"]["length_m"]),
-        deck_width_m=float(raw["deck"]["width_m"]),
-        where={c: cells[c]["where"] for c in ids},
-        positions=np.array([[cells[c]["x_m"], cells[c]["y_m"]] for c in ids], dtype=float),
-        newtons_per_volt=np.array([cells[s[0]]["newtons_per_volt"][s[1]] for s in SIGNAL_NAMES],
-                                  dtype=float),
-        placeholder=bool(raw.get("scale_is_placeholder", False)),
-        path=Path(path),
-        serials={c: cells[c].get("serial", "") for c in ids},
-        uncross=np.array([np.linalg.inv(np.array(cells[c].get("crosstalk", np.eye(3)), dtype=float))
-                          for c in ids]),
-        raw=raw,
-    )
-
-
-def load_layout(path: Path = LAYOUT_FILE) -> Layout:
-    """Read forceplate_layout.json (see the "about" lines in it)."""
-    return parse_layout(json.loads(Path(path).read_text(encoding="utf-8")), path)
-
-
-def session_layout(folder: Path, default: Layout) -> Layout:
-    """
-    The layout a session was recorded with: the copy in its session.json, so a
-    later rewiring or new scale doesn't silently change old data. Sessions from
-    before that copy was kept get `default`.
-    """
-    try:
-        raw = json.loads((Path(folder) / "session.json").read_text(encoding="utf-8")).get("layout")
-    except (OSError, ValueError):
-        raw = None
-    return parse_layout(raw, Path(folder) / "session.json") if raw else default
-
-
-def cell_forces(volts: np.ndarray, zero: np.ndarray | None, layout: Layout) -> np.ndarray:
-    """
-    Volts (..., 12) -> newtons (..., 12), each cell in its own axes. No zero: untared.
-    Each channel is scaled by its own N/V, then each cell's three readings are
-    corrected for crosstalk with the inverse of its sheet's matrix (worked on
-    magnitudes, so a negative N/V only flips the axis afterwards).
-    """
-    npv = layout.newtons_per_volt
-    read = (volts - (0.0 if zero is None else zero)) * np.abs(npv)
-    read = read.reshape(*read.shape[:-1], 4, 3)
-    true = np.einsum("cij,...cj->...ci", layout.uncross, read)
-    return true.reshape(*true.shape[:-2], 12) * np.sign(npv)
-
-
-def cop_from_cells(forces: np.ndarray, layout: Layout,
-                   min_n: float = 20.0) -> tuple[float, float, float] | None:
-    """
-    Centre of pressure from geometry alone: the four vertical (Z) forces, (12,)
-    newtons, weighted by where the cells sit. Returns (x, y, total Fz), or None
-    when the total is under `min_n` and the ratio would only be noise.
-    """
-    fz = forces[[SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]]
-    total = fz.sum()
-    if abs(total) < min_n:
-        return None
-    x, y = fz @ layout.positions / total
-    return float(x), float(y), float(total)
 
 
 def cell_norm_spectrum(data: np.ndarray, rate: float, nfft: int | None = None
@@ -502,51 +318,27 @@ def cell_norm_spectrum(data: np.ndarray, rate: float, nfft: int | None = None
     return np.fft.rfftfreq(nfft, 1 / rate), norms
 
 
-def report(fit: Fit):
-    k = len(fit.trial_ids)
-    print(f"\nLoad trials used: {k}   signal-matrix rank: {fit.rank} of 12")
-    if k < 12 or fit.rank < 12:
-        print("  WARNING: fewer than 12 independent trials; the matrix is not fully"
-              " determined. Add trials at more locations and in more directions.")
-    sv = fit.singular_values
-    if len(sv) and sv[-1] > 0:
-        print(f"  condition number: {sv[0] / sv[-1]:.3g}")
+# Calibration (sheets, wiring, layout, cell forces and the 6x12 fit) lives in
+# loadcell_cal.py. These names stay importable from here for older scripts.
+_MOVED = {"known_load", "Fit", "gather", "fit_calibration", "save_fit", "centre_of_pressure",
+          "report", "LOAD_NAMES", "LOAD_UNITS", "LAYOUT_FILE", "Layout", "parse_layout",
+          "load_layout", "session_layout", "cell_forces", "cop_from_cells"}
 
-    print("\nCalibration matrix (rows: load, columns: tared volts)")
-    print("       " + "".join(f"{s:>9}" for s in SIGNAL_NAMES))
-    for name, row in zip(LOAD_NAMES, fit.matrix):
-        print(f"  {name:4} " + "".join(f"{v:9.3g}" for v in row))
 
-    print("\nRMS error over the trials: " + ", ".join(
-        f"{n} {e:.3g} {u}" for n, e, u in zip(LOAD_NAMES, fit.rms_error, LOAD_UNITS)))
-
-    print("\nPer trial (known -> predicted)")
-    for tid, known, pred in zip(fit.trial_ids, fit.known, fit.predicted):
-        parts = [f"{n} {a:7.1f}->{b:7.1f}" for n, a, b in zip(LOAD_NAMES[:3], known, pred)]
-        line = f"  trial {tid:3d}: " + "  ".join(parts)
-        if abs(known[2]) > 1e-9 and abs(pred[2]) > 1e-9:
-            kx, ky = centre_of_pressure(known)
-            px, py = centre_of_pressure(pred)
-            line += f"   COP ({kx:+.3f},{ky:+.3f})->({px:+.3f},{py:+.3f}) m"
-        print(line)
+def __getattr__(name):
+    if name in _MOVED:
+        import loadcell_cal
+        return getattr(loadcell_cal, name)
+    raise AttributeError(f"module 'forceplate' has no attribute {name!r}")
 
 
 def main():
+    """`uv run forceplate.py <session>`: fit the 6x12 matrix (see loadcell_cal.py)."""
+    import argparse
+    import loadcell_cal
     parser = argparse.ArgumentParser(description="Fit the 6x12 force-plate calibration matrix.")
     parser.add_argument("session", type=Path, help="session folder containing session.json")
-    args = parser.parse_args()
-
-    session = Session.load(args.session)
-    print(f"Session {session.folder}: {len(session.trials)} captures")
-    ids, signals, known = gather(session)
-    if not ids:
-        print("No usable load trials (each needs a tare captured before it).")
-        sys.exit(1)
-
-    fit = fit_calibration(ids, signals, known)
-    report(fit)
-    json_path, csv_path = save_fit(fit, session)
-    print(f"\nSaved {json_path} and {csv_path}")
+    sys.exit(loadcell_cal.run_fit(parser.parse_args().session))
 
 
 if __name__ == "__main__":

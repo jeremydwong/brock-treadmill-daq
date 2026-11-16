@@ -17,6 +17,7 @@ import pytest
 import usb.util
 
 import forceplate as fp
+import loadcell_cal as lc
 from mcc1608g import USB1608G
 from test_driver_fake_device import FakeUsbDevice
 
@@ -48,15 +49,15 @@ def synthetic_session(tmp_path, true_matrix, n_locations=8, noise_v=0.0, seed=0)
 
 def test_known_load_moments():
     # Frame: +x right, +y back, +z down. 100 N pressing down, 0.2 m right, 0.5 m back.
-    load = fp.known_load("down", 100.0, 0.2, 0.5, 0.0)
+    load = lc.known_load("down", 100.0, 0.2, 0.5, 0.0)
     np.testing.assert_allclose(load[:3], [0, 0, 100])
     np.testing.assert_allclose(load[3:], [50.0, -20.0, 0.0])   # r x F
-    assert fp.centre_of_pressure(load) == pytest.approx((0.2, 0.5))
+    assert lc.centre_of_pressure(load) == pytest.approx((0.2, 0.5))
     # Forward is -y: a forward pull 0.2 m right of the left edge gives Mz = x*Fy.
-    np.testing.assert_allclose(fp.known_load("forward", 10.0, 0.2, 0.3, 0.0),
+    np.testing.assert_allclose(lc.known_load("forward", 10.0, 0.2, 0.3, 0.0),
                                [0, -10, 0, 0, 0, -2.0])
     # A rightward pull on the substructure, 0.1 m below the deck surface.
-    np.testing.assert_allclose(fp.known_load("right", 10.0, 0.3, 1.0, 0.1),
+    np.testing.assert_allclose(lc.known_load("right", 10.0, 0.3, 1.0, 0.1),
                                [10, 0, 0, 0, 1.0, -10.0])
 
 
@@ -120,15 +121,15 @@ def test_capture_csv_round_trip(tmp_path):
 def test_fit_recovers_true_matrix(tmp_path):
     true_matrix = np.random.default_rng(1).normal(0, 50, (6, 12))
     session = synthetic_session(tmp_path, true_matrix)
-    ids, signals, known = fp.gather(session)
+    ids, signals, known = lc.gather(session)
     assert len(ids) == 8 * len(fp.DIRECTIONS)
-    fit = fp.fit_calibration(ids, signals, known)
+    fit = lc.fit_calibration(ids, signals, known)
     # CSVs hold volts to 1 uV, so the fit is exact to about that.
     np.testing.assert_allclose(fit.predicted, fit.known, atol=0.01)
 
-    json_path, csv_path = fp.save_fit(fit, session)
+    json_path, csv_path = lc.save_fit(fit, session)
     saved = json.loads(json_path.read_text())
-    assert saved["rows"] == fp.LOAD_NAMES and saved["columns"] == fp.SIGNAL_NAMES
+    assert saved["rows"] == lc.LOAD_NAMES and saved["columns"] == fp.SIGNAL_NAMES
     assert np.array(saved["matrix"]).shape == (6, 12)
     assert csv_path.read_text().splitlines()[0] == "load," + ",".join(fp.SIGNAL_NAMES)
 
@@ -136,7 +137,7 @@ def test_fit_recovers_true_matrix(tmp_path):
 def test_fit_with_noise_still_predicts_loads(tmp_path):
     true_matrix = np.random.default_rng(2).normal(0, 50, (6, 12))
     session = synthetic_session(tmp_path, true_matrix, n_locations=10, noise_v=0.002)
-    fit = fp.fit_calibration(*fp.gather(session))
+    fit = lc.fit_calibration(*lc.gather(session))
     assert fit.rms_error[:3].max() < 1.0      # newtons, on ~196 N loads
     assert fit.rms_error[3:].max() < 0.5      # newton-metres
 
@@ -146,21 +147,21 @@ def test_loads_without_tare_are_skipped(tmp_path):
     fields = fp.load_trial_entry("down", 0, 0, 0, 98.0)
     session.add_trial(np.zeros((10, 12)), 1000.0, "load", **fields)
     assert session.trials[0]["tare_id"] is None
-    ids, _, _ = fp.gather(session)
+    ids, _, _ = lc.gather(session)
     assert ids == []
 
 
-def plain_layout(npv: float = 1000.0) -> fp.Layout:
+def plain_layout(npv: float = 1000.0) -> lc.Layout:
     """The real positions, with one scale on every channel and no crosstalk: for geometry tests."""
-    raw = json.loads(fp.LAYOUT_FILE.read_text(encoding="utf-8"))
+    raw = json.loads(lc.LAYOUT_FILE.read_text(encoding="utf-8"))
     for cell in raw["load_cells"].values():
         cell["newtons_per_volt"] = {a: npv for a in "XYZ"}
-        cell.pop("crosstalk", None)
-    return fp.parse_layout(raw, fp.LAYOUT_FILE)
+        cell["crosstalk"] = np.eye(3).tolist()
+    return lc.parse_layout(raw, lc.LAYOUT_FILE)
 
 
 def test_layout_holds_the_calibration_sheets():
-    layout = fp.load_layout()
+    layout = lc.load_layout()
     assert not layout.placeholder
     assert layout.serials == {"1": "TR3D-A-3K 401", "2": "TR3D-A-3K 402",
                               "3": "TR3D-A-3K 405", "4": "TR3D-A-3K 406"}
@@ -172,7 +173,7 @@ def test_layout_holds_the_calibration_sheets():
     volts = np.zeros(12)
     volts[:3] = cross @ [0.0, 0.0, 1000.0] / layout.newtons_per_volt[:3]
     assert volts[0] != 0 and volts[1] != 0
-    np.testing.assert_allclose(fp.cell_forces(volts, None, layout)[:3], [0, 0, 1000], atol=1e-9)
+    np.testing.assert_allclose(lc.cell_forces(volts, None, layout)[:3], [0, 0, 1000], atol=1e-9)
 
 
 def test_negative_scale_flips_only_that_axis():
@@ -180,24 +181,24 @@ def test_negative_scale_flips_only_that_axis():
     layout.newtons_per_volt[2] = -1000.0                 # 1Z wired upside down
     volts = np.zeros(12)
     volts[2] = 0.5
-    f = fp.cell_forces(volts, None, layout)
+    f = lc.cell_forces(volts, None, layout)
     assert f[2] == pytest.approx(-500.0) and not f[[0, 1, 3, 4, 5]].any()
 
 
 def test_session_keeps_the_layout_it_was_recorded_with(tmp_path):
-    layout = fp.load_layout()
+    layout = lc.load_layout()
     session = fp.Session.create(tmp_path / "s", 1.6, 0.6, layout=layout)
     meta = json.loads((session.folder / "session.json").read_text(encoding="utf-8"))
     assert meta["layout"]["load_cells"]["3"]["serial"] == "TR3D-A-3K 405"
     other = plain_layout(1.0)
-    kept = fp.session_layout(session.folder, other)
+    kept = lc.session_layout(session.folder, other)
     np.testing.assert_allclose(kept.newtons_per_volt, layout.newtons_per_volt)
     old = fp.Session.create(tmp_path / "old", 1.6, 0.6)  # recorded before sessions kept one
-    assert fp.session_layout(old.folder, other) is other
+    assert lc.session_layout(old.folder, other) is other
 
 
 def test_layout_file_matches_channel_order():
-    layout = fp.load_layout()
+    layout = lc.load_layout()
     assert layout.positions.shape == (4, 2) and layout.newtons_per_volt.shape == (12,)
     # Every cell sits on the deck it describes.
     assert (layout.positions >= 0).all()
@@ -212,19 +213,19 @@ def test_cop_from_cell_geometry():
     # Equal volts on all four Z channels: the middle of the four cells.
     volts = zero.copy()
     volts[z] += 0.1
-    x, y, total = fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)
+    x, y, total = lc.cop_from_cells(lc.cell_forces(volts, zero, layout), layout)
     assert (x, y) == pytest.approx(layout.positions.mean(axis=0))
     assert total == pytest.approx(0.1 * layout.newtons_per_volt[z].sum())
     # All of it on cell 3: right on top of cell 3.
     volts = zero.copy()
     volts[z[2]] += 0.2
-    x, y, _ = fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)
+    x, y, _ = lc.cop_from_cells(lc.cell_forces(volts, zero, layout), layout)
     assert (x, y) == pytest.approx(layout.positions[2])
     # X and Y forces don't move it, and too little load gives no answer.
     volts[[0, 1, 9, 10]] += 1.0
-    assert fp.cop_from_cells(fp.cell_forces(volts, zero, layout), layout)[:2] \
+    assert lc.cop_from_cells(lc.cell_forces(volts, zero, layout), layout)[:2] \
         == pytest.approx(layout.positions[2])
-    assert fp.cop_from_cells(np.zeros(12), layout) is None
+    assert lc.cop_from_cells(np.zeros(12), layout) is None
 
 
 def test_remove_trial_keeps_csv(tmp_path):
@@ -344,7 +345,7 @@ def test_gui_loopback_fixed_and_sine(app):
 
     app._ao_off()
     pump(app, lambda: "off" in app.status.cget("text"))
-    assert fp.gather(app.session)[0] == []        # loopback captures never reach the fit
+    assert lc.gather(app.session)[0] == []        # loopback captures never reach the fit
 
 
 def test_gui_live_view_fills_buffer(app):
@@ -371,7 +372,7 @@ def test_gui_cop_from_live_volts(app):
     z = [fp.SIGNAL_NAMES.index(f"{c}Z") for c in "1234"]
     volts[z] = [0.1, 0.1, 0.3, 0.3]
     app._show_cop(volts, app.zero_v, "Live")
-    fz = fp.cell_forces(volts, app.zero_v, app.layout)[z]       # each cell's own scale
+    fz = lc.cell_forces(volts, app.zero_v, app.layout)[z]       # each cell's own scale
     expected = (app.layout.positions * fz[:, None]).sum(axis=0) / fz.sum()
     assert app.cop == pytest.approx(tuple(expected))
     assert app.canvas.find_withtag("cop")                  # drawn on the deck
@@ -780,3 +781,76 @@ def test_gui_live_view_without_a_daq_connects_when_plugged_in(monkeypatch, tmp_p
         app._on_live_toggle()
     finally:
         app._on_close()
+
+
+# ---------------------------------------------------------------------------
+# loadcell_cal: sheets and wiring
+# ---------------------------------------------------------------------------
+
+def test_sheet_scales_on_our_amplifier():
+    # 401's sheet: 1 mV/V = 830.0 lbf = 3692.1 N on X; 10 V x 201 gives 2.01 V per mV/V
+    assert lc.newtons_per_volt("401")[0] == pytest.approx(3692.1 / 2.01, abs=0.1)
+    assert lc.newtons_per_volt("TR3D-A-3K 401")[0] == lc.newtons_per_volt("401")[0]
+    # 100 kOhm shunt = 728.3 lbf on 401 X, i.e. 728.3 / 830.0 mV/V -> 1.764 V
+    assert lc.expected_shunt_step_v("401")[0] == pytest.approx(728.3 / 830.0 * 2.01)
+    assert lc.expected_unbalance_v("402")[2] == pytest.approx(0.528 * 2010 / 1996.5)
+
+
+def rest_volts(wiring: dict[str, str], deck_z: float = 1.5) -> np.ndarray:
+    """What an unloaded deck reads with these serials on inputs 1-4 (Z carries the deck)."""
+    v = np.concatenate([lc.expected_unbalance_v(wiring[c]) for c in "1234"])
+    v[2::3] += deck_z
+    return v
+
+
+def test_identify_serials_finds_a_swap():
+    swapped = {"1": "401", "2": "402", "3": "406", "4": "405"}
+    found = lc.identify_serials(rest_volts(swapped) + 0.02)
+    assert found.assignment == swapped and found.trusted
+    assert found.runner_up_v > found.cost_v
+    for perm in [("405", "401", "406", "402"), ("402", "406", "401", "405")]:
+        wiring = dict(zip("1234", perm))
+        assert lc.identify_serials(rest_volts(wiring)).assignment == wiring
+    assert not lc.identify_serials(np.full(12, -5.5)).trusted      # amplifier off: no match
+
+
+def test_calibration_for_session_identifies_old_wiring(tmp_path):
+    layout = lc.load_layout()
+    session = fp.Session.create(tmp_path / "s", 1.6, 0.6)         # no layout copy kept
+    swapped = {"1": "401", "2": "402", "3": "406", "4": "405"}
+    session.add_trial(np.tile(rest_volts(swapped), (100, 1)), 1000.0, "tare")
+    used, note = lc.calibration_for_session(session.folder, layout)
+    assert used.wiring == swapped and "3,4" in note
+    # Each input takes its serial's corner: 406 is back left wherever it is plugged in.
+    assert used.where["3"] == "back left" and used.where["4"] == "back right"
+    np.testing.assert_allclose(used.positions[2], layout.positions[3])
+    np.testing.assert_allclose(used.newtons_per_volt[6:9], lc.newtons_per_volt("406"), atol=0.01)
+    # Wired as expected: the default layout, no note.
+    ok = fp.Session.create(tmp_path / "ok", 1.6, 0.6)
+    ok.add_trial(np.tile(rest_volts(layout.wiring), (100, 1)), 1000.0, "tare")
+    assert lc.calibration_for_session(ok.folder, layout) == (layout, None)
+    # A session that kept its layout is read with that, whatever its rest volts say.
+    kept = fp.Session.create(tmp_path / "kept", 1.6, 0.6, layout=layout)
+    kept.add_trial(np.tile(rest_volts(swapped), (100, 1)), 1000.0, "tare")
+    used, note = lc.calibration_for_session(kept.folder, layout)
+    assert used.wiring == layout.wiring and note is None
+
+
+def test_layout_flip_and_override():
+    raw = json.loads(lc.LAYOUT_FILE.read_text(encoding="utf-8"))
+    raw["load_cells"]["2"]["flip"] = ["X"]
+    raw["load_cells"]["3"]["newtons_per_volt"] = {"X": 1.0, "Y": 2.0, "Z": 3.0}
+    layout = lc.parse_layout(raw, lc.LAYOUT_FILE)
+    assert layout.newtons_per_volt[3] == pytest.approx(-lc.newtons_per_volt("402")[0], abs=0.01)
+    np.testing.assert_allclose(layout.newtons_per_volt[6:9], [1, 2, 3])
+    # The stored copy has the numbers filled in, and reads back the same.
+    again = lc.parse_layout(layout.raw, lc.LAYOUT_FILE)
+    np.testing.assert_allclose(again.newtons_per_volt, layout.newtons_per_volt)
+    np.testing.assert_allclose(again.uncross, layout.uncross)
+
+
+def test_forceplate_still_exports_the_calibration():
+    assert fp.cell_forces is lc.cell_forces and fp.Layout is lc.Layout
+    assert fp.fit_calibration is lc.fit_calibration and fp.LOAD_NAMES is lc.LOAD_NAMES
+    with pytest.raises(AttributeError):
+        fp.no_such_thing

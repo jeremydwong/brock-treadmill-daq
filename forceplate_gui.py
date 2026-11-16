@@ -68,6 +68,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 import forceplate as fp
+import loadcell_cal as lc
 from mcc1608g import USB1608G, AiMode, AiRange, DaqError
 
 # Deck size and load-cell positions: forceplate_layout.json (or --length/--width,
@@ -513,10 +514,10 @@ class App(tk.Tk):
     def __init__(self, daq: USB1608G | None, daq_error: str = "",
                  session_dir: Path | None = None,
                  deck_length: float | None = None, deck_width: float | None = None,
-                 layout: fp.Layout | None = None):
+                 layout: lc.Layout | None = None):
         super().__init__()
         self.title("Force-plate calibration")
-        self.layout = layout or fp.load_layout()
+        self.layout = layout or lc.load_layout()
         self.deck_length = deck_length or self.layout.deck_length_m   # metres, front to back (y)
         self.deck_width = deck_width or self.layout.deck_width_m      # metres, side to side (x)
         self.settings = load_settings()
@@ -1316,7 +1317,7 @@ class App(tk.Tk):
         thins each line to about that many samples, for a quick live redraw.
         """
         loop = self.loopback.get()
-        data = volts if loop else fp.cell_forces(volts, zero, self.layout)
+        data = volts if loop else lc.cell_forces(volts, zero, self.layout)
         t = t0 + np.arange(len(data)) / rate
         step = max(1, len(data) // points) if points else 1
         for i, line in enumerate(self.lines):
@@ -1346,8 +1347,8 @@ class App(tk.Tk):
         elif zero is None:
             text = f"{what}: tare first (no load, Tare) to see the centre of pressure."
         else:
-            forces = fp.cell_forces(mean_v, zero, self.layout)
-            cop = fp.cop_from_cells(forces, self.layout)
+            forces = lc.cell_forces(mean_v, zero, self.layout)
+            cop = lc.cop_from_cells(forces, self.layout)
             if cop is None:
                 text = f"{what}: almost no load on the deck."
             else:
@@ -1388,7 +1389,7 @@ class App(tk.Tk):
         if t["kind"] == "loopback":
             data, unit = volts, "volts"
         else:
-            data = fp.cell_forces(volts, zero, self.layout)
+            data = lc.cell_forces(volts, zero, self.layout)
             unit = "newtons" + ("" if zero is not None else " (NOT TARED)")
             if self.layout.placeholder:
                 unit += ", placeholder scale"
@@ -1488,11 +1489,11 @@ class App(tk.Tk):
             return
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            ids, signals, known = fp.gather(self.session)
+            ids, signals, known = lc.gather(self.session)
             if ids:
-                fit = fp.fit_calibration(ids, signals, known)
-                fp.report(fit)
-                paths = fp.save_fit(fit, self.session)
+                fit = lc.fit_calibration(ids, signals, known)
+                lc.report(fit)
+                paths = lc.save_fit(fit, self.session)
                 print(f"\nSaved {paths[0]} and {paths[1]}")
             else:
                 print("No usable load trials (each needs a tare captured before it).")
@@ -1598,7 +1599,7 @@ class App(tk.Tk):
         self.destroy()
 
 
-def load_capture(path: Path, layout: fp.Layout) -> tuple[np.ndarray, float, str, str]:
+def load_capture(path: Path, layout: lc.Layout) -> tuple[np.ndarray, float, str, str]:
     """
     Read a capture CSV for viewing: (data, rate, title, unit). If its folder has
     a session.json, the trial's notes go in the title and a load is shown in
@@ -1622,11 +1623,13 @@ def load_capture(path: Path, layout: fp.Layout) -> tuple[np.ndarray, float, str,
                 title += f"   ({entry['notes']})"
     if entry is not None and entry.get("kind") == "loopback":
         return volts, rate, title, "volts"
-    layout = fp.session_layout(path.parent, layout)
+    layout, note = lc.calibration_for_session(path.parent, layout)
+    if note:
+        title += f"   [{note}]"
     unit = "newtons" + ("" if zero is not None else " (NOT TARED)")
     if layout.placeholder:
         unit += ", placeholder scale"
-    return fp.cell_forces(volts, zero, layout), rate, title, unit
+    return lc.cell_forces(volts, zero, layout), rate, title, unit
 
 
 def load_settings() -> dict:

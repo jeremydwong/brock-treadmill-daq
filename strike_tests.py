@@ -48,6 +48,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import forceplate as fp
+import loadcell_cal as lc
 
 WINDOW = 1024             # samples analysed after the strike (1.024 s at 1 kHz)
 NFFT = 16384              # zero-padded FFT length
@@ -126,10 +127,10 @@ def mode_shape(phases: np.ndarray, amps: np.ndarray) -> str:
     return "cells " + ",".join(map(str, up)) + " against " + ",".join(map(str, down))
 
 
-def analyse(path: Path, layout: fp.Layout) -> dict:
+def analyse(path: Path, layout: lc.Layout) -> dict:
     data = np.loadtxt(path, delimiter=",", skiprows=1)
     t = data[:, 0]
-    forces = fp.cell_forces(data[:, 1:], None, layout)    # newtons; the mean is removed below
+    forces = lc.cell_forces(data[:, 1:], None, layout)    # newtons; the mean is removed below
     rate = 1 / np.median(np.diff(t))
     k0 = find_strike(forces)
     if k0 + WINDOW > len(forces) or k0 < WINDOW + 50:
@@ -305,7 +306,9 @@ def main():
         parser.error("no trials given and none have 'strike' in their notes")
     out_dir = args.out or args.session / "strike_analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
-    layout = fp.session_layout(args.session, fp.load_layout())
+    layout, note = lc.calibration_for_session(args.session, lc.load_layout())
+    if note:
+        print(f"Note: {note}")
     unit = "N, placeholder scale" if layout.placeholder else "N"
     if layout.placeholder:
         print(f"Note: {layout.path.name} still has placeholder scales; newtons are only relative.")

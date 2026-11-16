@@ -1,19 +1,17 @@
 {
   "about": [
-    "Where the four load cells sit under the deck, and how to turn their volts into newtons.",
+    "Where the four load cells sit under the deck, and which one we expect on each amplifier input.",
     "Positions are measured on the top surface from the deck's FRONT-LEFT corner (seen from above,",
     "facing forward on the belt): x_m to the right, y_m toward the back, in metres, to the centre",
     "of each load cell. (The positions are still rough: measure them.)",
-    "WIRING: load cell N plugs into the amplifier's load-cell input N (M12 connectors 1-4 on the",
-    "Michigan Scientific SGA12), so signals NX, NY, NZ come out on wire bundle N. 'serial' is the",
-    "Michigan Scientific serial (TR3D-A-3K ###) of the cell at that corner on that input.",
-    "SCALE: newtons_per_volt is per axis, from that serial's calibration sheet. The SGA12 has gain",
-    "201 and 10 V excitation, so a sheet giving '1 mV/V = L newtons' means newtons_per_volt =",
-    "L / 2.01. A negative number flips that axis (the GUI wants a load pressing down to be +Z).",
-    "CROSSTALK: rows are what the X, Y, Z channels read, columns the load applied on X, Y, Z,",
-    "as a fraction (sheet 'Output (lb)' / applied lb, fitted over +/-3000 lbf). Forces are",
-    "corrected by its inverse. Leave it out for no correction.",
-    "Sheets: Dropbox 'Treadmill Brock 2025/Instrumentation design/michsci calibration'."
+    "WIRING: entry N is amplifier input N (M12 connectors 1-4 on the Michigan Scientific SGA12),",
+    "so signals NX, NY, NZ come out on wire bundle N. 'serial' is the TR3D-A-3K serial of the cell",
+    "we expect there. A corner belongs to its serial: if loadcell_cal.py finds the serials on other",
+    "inputs (from their resting volts), each input takes its serial's corner.",
+    "SCALE: newtons per volt and crosstalk come from each serial's calibration sheet, typed into",
+    "loadcell_cal.SHEETS. To override them for one cell, add \"newtons_per_volt\": {\"X\": .., \"Y\": ..,",
+    "\"Z\": ..} and/or \"crosstalk\": [[..],[..],[..]] to its entry. \"flip\": [\"X\"] makes that axis",
+    "negative (the GUI wants a load pressing down on the deck to be +Z)."
   ],
   "deck": {
     "width_m": 0.6,
@@ -29,54 +27,26 @@
     "1": {
       "where": "front left",
       "serial": "TR3D-A-3K 401",
-      "calibrated": "03/20/2026",
       "x_m": 0.05,
-      "y_m": 0.05,
-      "newtons_per_volt": {"X": 1836.8, "Y": 1735.0, "Z": 1741.9},
-      "crosstalk": [
-        [1.0, -0.00584, 0.00745],
-        [0.00187, 1.0, -0.00723],
-        [-0.00507, -0.00116, 1.0]
-      ]
+      "y_m": 0.05
     },
     "2": {
       "where": "front right",
       "serial": "TR3D-A-3K 402",
-      "calibrated": "05/20/2026",
       "x_m": 0.55,
-      "y_m": 0.05,
-      "newtons_per_volt": {"X": 1841.5, "Y": 1742.1, "Z": 1725.1},
-      "crosstalk": [
-        [1.0, -0.00013, 0.00286],
-        [0.00177, 1.0, 0.00154],
-        [-0.00051, 0.00132, 1.0]
-      ]
+      "y_m": 0.05
     },
     "3": {
       "where": "back right",
       "serial": "TR3D-A-3K 405",
-      "calibrated": "02/19/2026",
       "x_m": 0.55,
-      "y_m": 1.55,
-      "newtons_per_volt": {"X": 1832.4, "Y": 1725.3, "Z": 1728.8},
-      "crosstalk": [
-        [1.0, 0.00207, 0.00308],
-        [0.00079, 1.0, 0.00293],
-        [-0.00124, -0.00061, 1.0]
-      ]
+      "y_m": 1.55
     },
     "4": {
       "where": "back left",
       "serial": "TR3D-A-3K 406",
-      "calibrated": "06/13/2026",
       "x_m": 0.05,
-      "y_m": 1.55,
-      "newtons_per_volt": {"X": 1852.8, "Y": 1748.7, "Z": 1739.2},
-      "crosstalk": [
-        [1.0, -0.00522, 0.00265],
-        [0.00774, 1.0, -0.00249],
-        [-0.00517, 0.00057, 1.0]
-      ]
+      "y_m": 1.55
     }
   }
 }

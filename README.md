@@ -286,8 +286,10 @@ These are kept, but the calibration fit ignores them.
 
 # Load-cell layout and wiring
 
-`forceplate_layout.json` (in this folder) says where each load cell is and how
-to turn its volts into newtons. Edit it in any text editor.
+`forceplate_layout.json` (in this folder) says where each load cell sits and which
+serial we expect on each amplifier input. Edit it in any text editor. The numbers
+that turn volts into newtons come from the calibration sheets, typed into
+`loadcell_cal.py` (see **Scale** below).
 
 **Plug-in order.** Load cell *N* goes into the amplifier's load-cell input *N*
 (the four M12 connectors on the Michigan Scientific SGA12), so its signals come
@@ -306,24 +308,35 @@ out on wire bundle *N* as NX, NY, NZ:
 left edge** and `y_m` how far **back from the front edge**, in metres, measured
 from the deck's front-left corner. The deck size there is the app's default.
 
-**Scale.** Each cell has its Michigan Scientific serial (`TR3D-A-3K 401` …) and
-the numbers from that serial's calibration sheet. `newtons_per_volt` is per axis. The
-amplifier has gain 201 and 10 V excitation, so if a sheet says "1 mV/V = *L* N":
+**Scale.** Each cell's Michigan Scientific serial (`TR3D-A-3K 401` …) picks its
+numbers from `SHEETS` in `loadcell_cal.py`, copied from that serial's calibration
+sheet. The amplifier has gain 201 and 10 V excitation, so if a sheet says
+"1 mV/V = *L* N":
 ```
 newtons_per_volt = L / 2.01
 ```
-`crosstalk` is the sheet's crosstalk as a fraction: rows are what the X, Y, Z
-channels read, and columns are the load applied on X, Y, Z. The app undoes it for
-each cell. A load pressing down should read as positive Z; if it reads negative,
-make that cell's Z number negative.
+The sheet's crosstalk (rows: what the X, Y, Z channels read; columns: the load
+applied on X, Y, Z) is undone for each cell. A load pressing down should read
+as positive Z; if an axis reads backwards, add `"flip": ["Z"]` to that cell. To
+override a sheet for one cell, give it its own `newtons_per_volt` and/or `crosstalk`.
 
-Each new session saves a copy of this file in its `session.json`. If cells are
-rewired or rescaled later, old sessions still open with the wiring and scales
-they were recorded with. The captures themselves are always raw volts.
+**Which cell is on which input.** Each cell has its own small output at no load
+(its "unbalance", on its sheet). Unloaded, a cell's X and Y read close to it, so
+the resting volts show which serial is on which input:
+```
+uv run loadcell_cal.py "<session folder>"
+```
+prints the resting X/Y per input against each sheet, the serials it identifies,
+the newtons per volt in use and, for loads with an entered force, the measured
+total against it. A corner belongs to its serial, so if cables were swapped
+(as on Nov 4, 2026, inputs 3 and 4), old captures open with the wiring their
+resting volts show. `uv run --extra sheets loadcell_cal.py --check-sheets` re-reads
+the PDFs and confirms `SHEETS` matches them.
 
-**If you move a cable or swap a load cell**, update `serial` (and its numbers) for
-that input before recording. In the two Nov 4, 2026 sessions, inputs 3 and 4 were
-swapped compared with this file.
+Each new session saves a copy of the layout, with every number filled in, in its
+`session.json`, and is always read with that copy. The captures themselves are
+always raw volts. **If you move a cable or swap a load cell**, change `serial` for
+that input before recording.
 
 # Wiring reference
 
@@ -418,8 +431,11 @@ samples, scans). The FPGA bitstream in `mcc1608g/firmware/` is the one MCC
 ships in libuldaq. The device loses it at power-off, so the driver uploads
 it on the first connection after power-up, which takes about a second.
 
-The calibration app is `forceplate_gui.py`, and the session files and fit are in
-`forceplate.py`. In single-ended mode CHnH is AI channel n and CHnL is n + 8, so one
+The calibration app is `forceplate_gui.py`. Session files, units and spectra are in
+`forceplate.py`. Everything that turns volts into newtons is in `loadcell_cal.py`:
+the calibration sheets, which serial is on which input, the layout, per-cell forces
+with crosstalk correction, and the 6×12 deck fit (`uv run loadcell_cal.py <session> --fit`,
+the same as `uv run forceplate.py <session>`). In single-ended mode CHnH is AI channel n and CHnL is n + 8, so one
 scan of channels 0–11 returns 1X 1Y 1Z 2X … 4Z in order.
 
 ## Testing

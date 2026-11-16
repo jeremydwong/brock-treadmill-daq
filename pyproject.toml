@@ -13,6 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 # Only needed by compare_uldaq.py, which checks our driver against MCC's library.
 compare = ["uldaq"]
+# Only needed by `loadcell_cal.py --check-sheets`, which re-reads the calibration PDFs.
+sheets = ["pypdf"]
 
 [project.scripts]
 loopback = "loopback_test:main"
@@ -21,6 +23,7 @@ sinusoid-scan = "sinusoid_scan:main"
 compare-uldaq = "compare_uldaq:main"
 forceplate-gui = "forceplate_gui:main"
 forceplate-fit = "forceplate:main"
+loadcell-cal = "loadcell_cal:main"
 capture-check = "capture_check:main"
 strike-tests = "strike_tests:main"
 
@@ -36,6 +39,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["mcc1608g"]
 include = ["loopback_test.py", "sinusoid_loopback.py", "sinusoid_scan.py", "compare_uldaq.py",
-           "forceplate.py", "forceplate_gui.py", "tk_env.py",
+           "forceplate.py", "forceplate_gui.py", "tk_env.py", "loadcell_cal.py",
            "loopback_live.py", "capture_check.py", "strike_tests.py",
            "forceplate_layout.json"]
