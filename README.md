@@ -198,14 +198,40 @@ range shown, which follows your zoom. Colours always mean the component
 **File ▸ Load data…** opens any earlier capture CSV in the Plot Results window, to look
 at old data. It starts in today's session folder, or the folder you used last.
 
-To find the deck's resonant frequencies from strike tests (tap the deck once
-during a log, with "strike" in the notes):
+### Strike tests: how the treadmill rings
+
+Hit the deck once with a mallet during a log (wait a second after pressing Log,
+and say where you hit in the notes). Then **File ▸ Strike analysis…** opens a
+window on the session, or run it by itself:
 ```
-uv run strike_tests.py "<session folder>"
+uv run modes_gui.py "<session folder>"
 ```
-It turns every channel into newtons with the per-axis `newtons_per_volt` in
-`forceplate_layout.json` (see below) before the spectra, so each cell's X/Y/Z
-norm adds forces, not volts. Plot Results does the same.
+Only the captures with a strike in them are listed (tares and standing loads are
+left out; untick the box under the list to see them), and the resting load on
+each corner is shown under the list. Pick a capture and tick what to plot. The four vertical forces are shown as
+what the whole treadmill is doing: **Fz total** (all four corners together: the
+deck bouncing, and what a gait analysis reads), **pitch** (front pair minus rear
+pair), **roll** (left minus right) and **twist** (one diagonal minus the other).
+You can also plot any pair of corners, any single channel, or your own sum or
+difference of two cells. The plots are the signals against time, a sliding-window
+spectrum (spectrogram) on the same time axis, and their spectrum over the
+shaded time window. Drag across either of the top two plots to move the window. A filter (low-pass,
+high-pass, band-pass, notch) can be put in front of everything. The table
+underneath lists each resonance in the window: its frequency, how much of it
+is bounce, pitch, roll and twist, and its damping.
+
+**Save figure…** writes the plots as EPS, PDF or SVG (vector) or PNG.
+**Strike report (PDF)…** finds every hit in the session and writes one PDF,
+named after the session folder (`<session>_strike_report.pdf`): a
+summary of the resonances that show up in more than one hit, then a page per
+hit. The same report from the terminal:
+```
+uv run deck_modes.py "<session folder>"
+```
+
+The older `uv run strike_tests.py "<session folder>" 5 8 9 10` still writes its
+per-cell |F| figures. Everything here turns each channel into newtons with its
+cell's calibration first, so forces add as forces, not volts.
 
 **Made a mistake?** Open **Details**, click the capture in the **Session** list
 and click **Remove selected**. Clicking a capture in the list also shows its

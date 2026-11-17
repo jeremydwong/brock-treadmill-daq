@@ -854,3 +854,16 @@ def test_forceplate_still_exports_the_calibration():
     assert fp.fit_calibration is lc.fit_calibration and fp.LOAD_NAMES is lc.LOAD_NAMES
     with pytest.raises(AttributeError):
         fp.no_such_thing
+
+
+def test_gui_strike_analysis_window_opens_on_the_session(app):
+    capture(app, "tare")
+    capture(app, "tare")
+    app._open_modes()
+    win = app.modes_window
+    assert win.folder == app.session.folder and len(win.trials) == 2
+    assert "using the whole capture" in win.status.cget("text")     # no hit in a tare
+    app._open_modes()                       # a second click only raises it
+    assert app.modes_window is win
+    win.close()
+    assert app.modes_window is None

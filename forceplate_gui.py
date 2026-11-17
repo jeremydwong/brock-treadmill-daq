@@ -69,6 +69,7 @@ from matplotlib.figure import Figure
 
 import forceplate as fp
 import loadcell_cal as lc
+import modes_gui
 from mcc1608g import USB1608G, AiMode, AiRange, DaqError
 
 # Deck size and load-cell positions: forceplate_layout.json (or --length/--width,
@@ -545,6 +546,7 @@ class App(tk.Tk):
         self._live_before_capture = False
         self._capture_seconds = fp.CAPTURE_SECONDS
         self.post_window: PostWindow | None = None
+        self.modes_window: modes_gui.ModesWindow | None = None
         self.post_data: tuple | None = None    # (data, rate, title, unit) of the last capture shown
         n_window = int(MONITOR_WINDOW_S * fp.SAMPLE_RATE)
         self.live_buffer = np.full((n_window, 12), np.nan)
@@ -581,6 +583,8 @@ class App(tk.Tk):
         file_menu.add_command(label="Load data...", command=self._load_data,
                               accelerator=f"{'Cmd' if mod == 'Command' else 'Ctrl'}+O")
         file_menu.add_command(label="Open data folder", command=self._open_data_folder)
+        file_menu.add_separator()
+        file_menu.add_command(label="Strike analysis...", command=self._open_modes)
         menubar.add_cascade(label="File", menu=file_menu)
         self.config(menu=menubar)
         self.bind_all(f"<{mod}-o>", lambda _e: self._load_data())
@@ -612,6 +616,17 @@ class App(tk.Tk):
         self._open_post_window().show(*shown)
         self.post_window.lift()
         self._set_status(f"Viewing {path.parent.name}/{path.name} in the Plot Results window.")
+
+    def _open_modes(self):
+        """The strike analysis window (modes_gui.py), on this session or the last one viewed."""
+        if self.modes_window is not None:
+            self.modes_window.lift()
+            return
+        folder = self.session.folder if self.session else self.settings.get("last_load_dir")
+        if folder is None or not (Path(folder) / "session.json").exists():
+            folder = None
+        self.modes_window = modes_gui.ModesWindow(
+            self, self.layout, folder, on_close=lambda: setattr(self, "modes_window", None))
 
     # -- layout: everything visual on the left -------------------------------
     def _build_visuals(self):
