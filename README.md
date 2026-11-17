@@ -109,6 +109,17 @@ If it says `No DAQ: ...` instead, see [Troubleshooting](#troubleshooting).
 
 To quit, close the window.
 
+### The strike analysis window (no DAQ needed)
+
+To look at hammer hits that are already recorded, start the analysis window by itself:
+```
+uv run modes_gui.py
+```
+It opens the session it was last closed on; the first time, click **Open...** and pick a
+session folder. To go straight to one: `uv run modes_gui.py "<session folder>"`. It is the
+same window as **File ▸ Strike analysis…** in the app, described under
+[Strike tests](#strike-tests-how-the-treadmill-rings) below.
+
 ---
 
 # Using the calibration app
@@ -424,6 +435,10 @@ you should see `forceplate_gui.py` in the list. Then run `uv sync` again.
 # For developers
 
 Other programs in this repository (run them the same way, from the project folder):
+- `uv run modes_gui.py`: the strike analysis window by itself (add a session folder to open that one)
+- `uv run deck_modes.py "<session folder>"`: the PDF strike report without the window
+- `uv run loadcell_cal.py "<session folder>"`: which cell is on which input, and the known-load check
+- `uv run strike_tests.py "<session folder>" 5 8 9 10`: the older per-cell |F| strike figures
 - `uv run loopback_live.py`: live plot of all 12 inputs while AOUT0 plays a sine (`--help` for options)
 - `uv run capture_check.py`: back-to-back full captures under load, to check a computer keeps up
 - `uv run loopback`: step voltages on AOUT0/1, read back on CH0/1
