@@ -30,7 +30,7 @@ def ringing_forces(seconds=5.0, hit_s=1.5, modes=((19.0, 0.012, "pitch", 60.0),
     return t, forces, layout
 
 
-def write_session(folder, forces, layout, notes="mallet rear left"):
+def write_session(folder, forces, layout, notes="mallet back left"):
     """A session folder holding one tare and one hit, stored as volts like the GUI does."""
     folder.mkdir()
     volts = forces / layout.newtons_per_volt          # crosstalk left out: close enough here
@@ -46,7 +46,7 @@ def test_corners_follow_positions_not_input_numbers():
     layout = lc.load_layout()
     assert dm.corner_inputs(layout) == [0, 1, 2, 3]
     swapped = lc.layout_for_wiring(layout, {"1": "401", "2": "402", "3": "406", "4": "405"})
-    assert dm.corner_inputs(swapped) == [0, 1, 3, 2]       # rear right is now input 4
+    assert dm.corner_inputs(swapped) == [0, 1, 3, 2]       # back right is now input 4
     pitch = np.array(dm.z_weights(swapped, dm.PATTERNS["roll"]))
     assert pitch[[2, 5, 8, 11]].tolist() == [1, -1, 1, -1]
 
@@ -55,6 +55,29 @@ def test_patterns_keep_the_power_of_the_four_z():
     z = np.random.default_rng(1).normal(size=4)
     parts = [(z @ np.array(w)) ** 2 / 4 for w in dm.PATTERNS.values()]
     assert sum(parts) == pytest.approx((z ** 2).sum())
+
+
+def test_formulas_are_written_from_the_patterns():
+    assert dm.pattern_formulas()[:4] == ["Fz total = FL + FR + BR + BL", "pitch    = FL + FR − BR − BL",
+                                         "roll     = FL − FR − BR + BL", "twist    = FL − FR + BR − BL"]
+
+
+def test_sideways_partners_pick_out_stretch_and_yaw():
+    layout = lc.load_layout()
+    signals = {s.name: s for s in dm.standard_signals(layout)["Sideways partners (X, Y)"]}
+    arm = layout.positions - layout.positions.mean(0)
+    turn, along, across, push = (np.zeros((1, 12)) for _ in range(4))
+    turn[0, 0::3], turn[0, 1::3] = -arm[:, 1], arm[:, 0]        # every corner pushed round the middle
+    along[0, 1::3] = np.sign(arm[:, 1]) * -10                   # front pushed back, back pushed forward
+    across[0, 0::3] = np.sign(arm[:, 0]) * -10
+    push[0, 0::3], push[0, 1::3] = 7.0, -3.0                    # the whole treadmill pushed sideways
+    read = lambda f: {k: round(float(s.series(f)[0]), 6) for k, s in signals.items()}   # noqa: E731
+    assert read(push) == {"Y: front − back": 0, "X: left − right": 0, "yaw": 0}
+    assert read(along) == {"Y: front − back": 40, "X: left − right": 0, "yaw": 0}
+    assert read(across) == {"Y: front − back": 0, "X: left − right": 40, "yaw": 0}
+    assert read(turn)["yaw"] > 0 and read(turn)["Y: front − back"] == 0
+    assert dm.horizontal_formulas(layout)[:2] == ["Y: front − back = FLy + FRy − BRy − BLy",
+                                                  "X: left − right = FLx − FRx − BRx + BLx"]
 
 
 def test_filters_pass_and_stop_without_a_time_shift():
@@ -91,7 +114,7 @@ def test_modes_are_named_with_their_damping():
     assert bounce["motion"].startswith("bounce") and bounce["shares"]["Fz total"] > 0.95
     assert pitch["damping"] == pytest.approx(0.012, rel=0.25)
     assert bounce["damping"] == pytest.approx(0.010, rel=0.25)
-    # In phase at every corner for the bounce; front against rear for the pitch
+    # In phase at every corner for the bounce; front against back for the pitch
     assert np.abs(bounce["corner_phase_deg"]).max() < 5
     assert np.abs(np.abs(pitch["corner_phase_deg"][2:]) - 180).max() < 5
     assert len(dm.mode_table(modes)) == 4
@@ -128,9 +151,11 @@ def test_session_report(tmp_path):
 
 
 @pytest.fixture
-def window(tmp_path):
+def window(tmp_path, monkeypatch):
     tk = pytest.importorskip("tkinter")
     import modes_gui
+
+    monkeypatch.setattr(modes_gui, "STATE_FILE", tmp_path / "state.json")
 
     t, forces, layout = ringing_forces()
     folder = write_session(tmp_path / "20260101-000000", forces, layout)
@@ -148,14 +173,15 @@ def window(tmp_path):
 def test_window_opens_on_the_hit_and_lists_its_modes(window):
     assert [t["id"] for t in window.trials] == [2]       # the tare has no hit: not listed
     assert "1 capture without a hit is not listed" in window.status.cget("text")
-    assert "total" in window.rest_label.cget("text")
+    assert "kg" in window.rest_label.cget("text")
     window.only_hits.set(False)
     window._list_trials()
     assert [t["id"] for t in window.trials] == [1, 2] and window.entry["id"] == 2
     assert abs(window.hit - 1500) <= 3
     assert [round(m["hz"]) for m in window.modes] == [19, 29]
     assert "bounce" in window.table.get("1.0", "end")
-    assert [s.name for s in window.checked()] == ["Fz total", "pitch", "roll", "twist"]
+    assert sorted(s.name for s in window.checked()) == sorted(
+        ["Fz total", "pitch", "roll", "twist", "Y: front − back", "X: left − right", "yaw"])
 
 
 def test_window_filter_pair_and_dragged_window(window, tmp_path):
@@ -187,3 +213,29 @@ def test_window_filter_pair_and_dragged_window(window, tmp_path):
         window.save_figure(tmp_path / f"plots.{ending}")
         assert (tmp_path / f"plots.{ending}").stat().st_size > 5000
     assert window.write_report(tmp_path / "report.pdf").exists()
+
+
+def test_last_session_is_remembered(tmp_path, monkeypatch):
+    import modes_gui
+
+    monkeypatch.setattr(modes_gui, "STATE_FILE", tmp_path / "state.json")
+    assert modes_gui.last_session() is None                 # no file yet
+    modes_gui.remember_session(None)                        # nothing was open: nothing written
+    assert not modes_gui.STATE_FILE.exists()
+    modes_gui.remember_session(tmp_path)
+    assert modes_gui.last_session() == tmp_path
+    modes_gui.remember_session(tmp_path / "deleted since")
+    assert modes_gui.last_session() is None                 # the folder has gone
+    modes_gui.STATE_FILE.write_text("not json")
+    assert modes_gui.last_session() is None
+
+
+def test_window_reopens_on_the_session_it_was_closed_on(window):
+    import modes_gui
+
+    folder, root, layout = window.folder, window.master, window.layout
+    window.close()
+    assert modes_gui.last_session() == folder
+    again = modes_gui.ModesWindow(root, layout)             # no folder given
+    again.withdraw()
+    assert again.folder == folder and again.entry["id"] == 2

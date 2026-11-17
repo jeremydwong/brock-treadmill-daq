@@ -206,12 +206,16 @@ window on the session, or run it by itself:
 ```
 uv run modes_gui.py "<session folder>"
 ```
+Opened without a folder, it goes back to the session it was last closed on
+(remembered in `.modes_gui_state.json` beside the code, which git ignores).
 Only the captures with a strike in them are listed (tares and standing loads are
-left out; untick the box under the list to see them), and the resting load on
+left out; untick **only hits** to see them), and the resting load on
 each corner is shown under the list. Pick a capture and tick what to plot. The four vertical forces are shown as
 what the whole treadmill is doing: **Fz total** (all four corners together: the
-deck bouncing, and what a gait analysis reads), **pitch** (front pair minus rear
+deck bouncing, and what a gait analysis reads), **pitch** (front pair minus back
 pair), **roll** (left minus right) and **twist** (one diagonal minus the other).
+The exact sums are written at the bottom left of the window and on every page
+of the report (pitch = FL + FR − BR − BL, and so on).
 You can also plot any pair of corners, any single channel, or your own sum or
 difference of two cells. The plots are the signals against time, a sliding-window
 spectrum (spectrogram) on the same time axis, and their spectrum over the

@@ -6,7 +6,7 @@ The twelve channels are four vertical forces and eight horizontal ones. Four
 vertical forces can only do four things, so every vertical reading is a mix of
 
   Fz total   all four corners together          (the deck bouncing; what gait analysis uses)
-  pitch      front pair minus rear pair         (rocking nose up / nose down)
+  pitch      front pair minus back pair         (rocking nose up / nose down)
   roll       left pair minus right pair         (rocking side to side)
   twist      one diagonal minus the other       (racking: carries no net load)
 
@@ -66,14 +66,27 @@ CELL_LINESTYLES = ["-", "--", ":", "-."]        # inputs 1-4, as in the Plot Res
 # Solid greys rather than transparency, which EPS cannot store
 SHADE_COLOR, MARK_COLOR, GRID_COLOR = "#eeeeee", "#cccccc", "#e6e6e6"
 
-CORNERS = ["front left", "front right", "rear right", "rear left"]
+CORNERS = ["front left", "front right", "back right", "back left"]
 PATTERNS = {              # weights on the corners above
     "Fz total": [1, 1, 1, 1],
     "pitch": [1, 1, -1, -1],
     "roll": [1, -1, -1, 1],
     "twist": [1, -1, 1, -1],
 }
-MOTION_NAMES = {"Fz total": "bounce (all corners together)", "pitch": "pitch (front against rear)",
+CORNER_SHORT = ["FL", "FR", "BR", "BL"]         # CORNERS, as written in the formulas
+
+
+def pattern_formulas() -> list[str]:
+    """Each pattern written out from PATTERNS, e.g. 'pitch = FL + FR − BR − BL'."""
+    lines = []
+    for name, weights in PATTERNS.items():
+        terms = "".join(f" {'+' if w > 0 else '−'} {c}" for c, w in zip(CORNER_SHORT, weights))
+        lines.append(f"{name:8} = {terms[3:]}")
+    return lines + ["each the Z (vertical) force at that corner:",
+                    "F front, B back, L left, R right"]
+
+
+MOTION_NAMES = {"Fz total": "bounce (all corners together)", "pitch": "pitch (front against back)",
                 "roll": "roll (left against right)", "twist": "twist (diagonals)"}
 
 
@@ -128,6 +141,61 @@ def z_weights(layout: lc.Layout, corner_weights) -> tuple[float, ...]:
     return tuple(w)
 
 
+def axis_weights(layout: lc.Layout, corner_weights, axis: str) -> np.ndarray:
+    """Weights on CORNERS -> (12,) weights on that axis (X, Y or Z) of the channels."""
+    w = np.zeros(12)
+    for corner, weight in zip(corner_inputs(layout), corner_weights):
+        w[3 * corner + "XYZ".index(axis)] = weight
+    return w
+
+
+def yaw_weights(layout: lc.Layout) -> np.ndarray:
+    """
+    (12,) weights giving the turning moment about the vertical through the
+    middle of the four cells, divided by the cells' mean distance from it: the
+    sideways force at the corners that would turn the treadmill, in newtons.
+    """
+    arm = layout.positions - layout.positions.mean(0)       # (4, 2) x, y from the middle
+    reach = np.linalg.norm(arm, axis=1).mean()
+    w = np.zeros(12)
+    w[0::3] = -arm[:, 1] / reach         # Mz = sum(x Fy - y Fx)
+    w[1::3] = arm[:, 0] / reach
+    return w
+
+
+def horizontal_partners(layout: lc.Layout) -> list[tuple[str, str, np.ndarray]]:
+    """
+    For pitch, roll and twist in turn, the sideways signal that goes with it:
+    (its partner's name, its own name, its (12,) weights).
+      pitch: front Y minus back Y   the frame stretched or squeezed along its length
+      roll:  left X minus right X   the same across its width
+      twist: yaw                    the frame turned about the vertical
+    """
+    return [("pitch", "Y: front − back", axis_weights(layout, PATTERNS["pitch"], "Y")),
+            ("roll", "X: left − right", axis_weights(layout, PATTERNS["roll"], "X")),
+            ("twist", "yaw", yaw_weights(layout))]
+
+
+def weights_formula(layout: lc.Layout, weights: np.ndarray) -> str:
+    """Weights written out by corner: 'FLy + FRy − BRy − BLy', '0.95 (FLx + ...) + 0.32 (−FLy ...)'."""
+    parts = []
+    for k, axis in enumerate("xyz"):
+        used = [(short, weights[3 * c + k]) for short, c in zip(CORNER_SHORT, corner_inputs(layout))
+                if abs(weights[3 * c + k]) > 1e-9]
+        if not used:
+            continue
+        size = abs(used[0][1])              # one size per axis in every signal we make
+        terms = "".join(f" {'+' if w > 0 else '−'} {short}{axis}" for short, w in used)
+        terms = terms[3:] if terms.startswith(" +") else "−" + terms[3:]
+        parts.append(terms if abs(size - 1) < 1e-9 else f"{size:.2f} ({terms})")
+    return " + ".join(parts)
+
+
+def horizontal_formulas(layout: lc.Layout) -> list[str]:
+    """The sideways partners written out, for the window's 'What is plotted' box."""
+    return [f"{name} = {weights_formula(layout, w)}" for _, name, w in horizontal_partners(layout)]
+
+
 def pair_signal(layout: lc.Layout, cell_a: int, cell_b: int, axis: str, sign: int) -> Signal:
     """Cell a's axis plus (sign=+1) or minus (-1) cell b's: inputs 1-4, axis X, Y or Z."""
     w = np.zeros(12)
@@ -151,9 +219,14 @@ def standard_signals(layout: lc.Layout) -> dict[str, list[Signal]]:
             Signal(name, z_weights(layout, PATTERNS[name]), color=MOTION_COLORS[name])
             for name in ("pitch", "roll", "twist")
         ],
+        # Dashed, in the colour of the Z motion each one goes with
+        "Sideways partners (X, Y)": [
+            Signal(name, tuple(w), color=MOTION_COLORS[partner], ls="--")
+            for partner, name, w in horizontal_partners(layout)
+        ],
         "Pairs (Z)": [
             Signal(name, z_weights(layout, w), color=AXIS_COLORS["Z"], ls=ls)
-            for name, w, ls in (("front pair", [1, 1, 0, 0], "--"), ("rear pair", [0, 0, 1, 1], ":"),
+            for name, w, ls in (("front pair", [1, 1, 0, 0], "--"), ("back pair", [0, 0, 1, 1], ":"),
                                 ("left pair", [1, 0, 0, 1], "-."), ("right pair", [0, 1, 1, 0], (0, (1, 3))))
         ],
         "Each cell": [
@@ -316,7 +389,7 @@ def ring_window(forces: np.ndarray, rate: float) -> tuple[int, int, int]:
 
 
 def describe_motion(shares: dict[str, float]) -> str:
-    """'pitch (front against rear)', or the two largest when none has 60%."""
+    """'pitch (front against back)', or the two largest when none has 60%."""
     ranked = sorted(shares, key=shares.get, reverse=True)
     if shares[ranked[0]] >= 0.6:
         return MOTION_NAMES[ranked[0]]
@@ -469,9 +542,21 @@ def resting_load_lines(static: dict[str, float] | None) -> list[str]:
     total = sum(static.values())
     return ["   ".join(f"{name} {static[name]:.0f} N" for name in CORNERS),
             f"total {total:.0f} N ({total / fp.GRAVITY:.0f} kg);  front pair "
-            f"{(static[CORNERS[0]] + static[CORNERS[1]]) / total * 100:.0f}%;  front left + rear right "
+            f"{(static[CORNERS[0]] + static[CORNERS[1]]) / total * 100:.0f}%;  front left + back right "
             f"{(static[CORNERS[0]] + static[CORNERS[2]]) / total * 100:.0f}% (50% when the two "
             "diagonals share evenly)"]
+
+
+def resting_load_short(static: dict[str, float] | None) -> str:
+    """The same on one short line, for the window."""
+    if not static:
+        return "not known for this session"
+    total = sum(static.values())
+    front = static[CORNERS[0]] + static[CORNERS[1]]
+    diagonal = static[CORNERS[0]] + static[CORNERS[2]]
+    return ("  ".join(f"{short} {static[name]:.0f}" for short, name in zip(CORNER_SHORT, CORNERS))
+            + f" N    {total / fp.GRAVITY:.0f} kg    front {front / total * 100:.0f}%"
+            f"    FL+BR {diagonal / total * 100:.0f}%")
 
 
 def default_report_name(folder: Path) -> str:
@@ -577,14 +662,14 @@ def summary_lines(result: dict) -> list[str]:
               "  trial  " + "  ".join(f"{lo:>3g}-{hi:<3g}" for lo, hi in BANDS)]
     for h in hits:
         lines.append(f"  {h['entry']['id']:>5}  " + "  ".join(f"{x * 100:6.0f}%" for x in h["bands"]))
-    lines += ["",
-              "bounce = all four corners together (Fz total), pitch = front against rear,",
+    lines += ["", "What is plotted:", *("  " + line for line in pattern_formulas()), "",
+              "bounce = all four corners together (Fz total), pitch = front against back,",
               "roll = left against right, twist = one diagonal against the other.",
               "Damping is the fraction of critical; – means two modes beat inside the band.",
               "",
               "Phase. At each resonance every corner's Z has an amplitude and a phase (where in",
               "its cycle it is). Nothing is shifted or searched for: pitch is simply front pair",
-              "minus rear pair with those phases kept, so corners in step add and corners",
+              "minus back pair with those phases kept, so corners in step add and corners",
               "opposed cancel. Each hit's page shows them: the table gives every corner as",
               "newtons @ degrees from the largest corner (0 = with it, 180 = against it, near",
               "90 = two modes overlapping), and the small decks (seen from above, front at the",
@@ -643,7 +728,11 @@ def draw_hit(figure, hit: dict, layout: lc.Layout, title: str):
     ax_txt.axis("off")
     ax_txt.text(0, 1, "\n".join(mode_table(hit["modes"])), family="monospace", fontsize=5.5,
                 va="top", transform=ax_txt.transAxes)
-
+    # What is plotted, on every page
+    formulas = [" ".join(line.split()) for line in pattern_formulas()[:4]]
+    figure.text(0.06, 0.012, "      ".join(formulas) + "\nEach term is the Z (vertical) force at "
+                "that corner: F front, B back, L left, R right.", family="monospace", fontsize=6,
+                va="bottom")
 
 def write_report(result: dict, out: Path) -> Path:
     """The summary page and one page per hit, as one PDF."""

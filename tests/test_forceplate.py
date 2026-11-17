@@ -856,7 +856,9 @@ def test_forceplate_still_exports_the_calibration():
         fp.no_such_thing
 
 
-def test_gui_strike_analysis_window_opens_on_the_session(app):
+def test_gui_strike_analysis_window_opens_on_the_session(app, monkeypatch, tmp_path):
+    import modes_gui
+    monkeypatch.setattr(modes_gui, "STATE_FILE", tmp_path / "state.json")
     capture(app, "tare")
     capture(app, "tare")
     app._open_modes()

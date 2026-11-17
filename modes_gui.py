@@ -4,31 +4,37 @@ Strike analysis window: a playground for the frequencies in a capture.
 
 Opens from the calibration GUI (File > Strike analysis) or by itself:
 
-  uv run modes_gui.py                        # then Open session...
+  uv run modes_gui.py                        # opens the session it was closed on
   uv run modes_gui.py "<session folder>"
 
 Pick a capture on the left. Tick what to plot:
 
   Whole treadmill   Fz total (what a gait analysis reads), Fx total, Fy total
-  Rocking, twisting pitch (front pair minus rear pair), roll (left minus right),
+  Rocking, twisting pitch (front pair minus back pair), roll (left minus right),
                     twist (one diagonal minus the other), all from the four Z
-  Pairs             the front, rear, left or right two Z added
+  Pairs             the front, back, left or right two Z added
   Each cell         X, Y, Z and |F| of each
   Your own pair     any two cells' X, Y or Z, added or subtracted
 
 The plots are the signals against time, under it on the same time axis a
 sliding-window spectrum (spectrogram) of the first signal ticked, and then
 their spectrum over the shaded time window. Drag across either of the top two
-plots to move the window; "ring-down
-after the hit" puts it back. A filter, if chosen, is applied before
-everything else and shifts nothing in time. The table under the plots lists
-the resonances in the window: how much of each is bounce, pitch, roll and
-twist, its damping, and each corner's Z as newtons @ phase. The row of small
-decks (seen from above) draws them as a disc per corner: its size is the
-amplitude, green + moves with the largest corner, red − against it.
+plots to move the window; "ring-down after the hit" puts it back.
 
-Only captures with a strike in them are listed (untick the box under the list
-to see the rest), and the resting load on each corner is shown under it.
+A filter, if chosen, is applied before everything else and shifts nothing in
+time (so a narrow band rings before the hit as well as after it): low-pass
+keeps below "to", high-pass keeps above "from", band-pass keeps between them
+and notch removes between them.
+
+The table under the plots lists the resonances in the window: how much of each
+is bounce, pitch, roll and twist, its damping, and each corner's Z as newtons
+@ phase. The row of small decks (seen from above) draws them as a disc per
+corner: its size is the amplitude, green + moves with the largest corner, red
+− against it.
+
+Only captures with a strike in them are listed (untick "only hits" to see the
+rest), and the resting load on each corner is shown under the list. The
+controls scroll if the screen is too short for them.
 
 "Save figure" writes the plots as EPS, PDF or SVG (vector) or PNG. "Strike
 report" analyses every hit in the session and writes a PDF.
@@ -39,6 +45,7 @@ The arithmetic is in deck_modes.py.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -46,7 +53,7 @@ import sys
 import tk_env  # noqa: F401  (must come before tkinter)
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -58,11 +65,35 @@ import loadcell_cal as lc
 
 MONO = "TkFixedFont"
 PLOT_DPI = 90
+# The session that was open when the window was last closed, so it opens there
+# next time. It sits beside this file and is not committed (.gitignore): it
+# holds a folder on this computer.
+STATE_FILE = Path(__file__).with_name(".modes_gui_state.json")
 MIN_WINDOW = 64           # samples: a shorter drag is ignored
 SPECTROGRAM_DB = 50       # the spectrogram shows this far below its loudest point
-DEFAULT_CHECKED = ["Fz total", "pitch", "roll", "twist"]
+DEFAULT_CHECKED = ["Fz total", "pitch", "roll", "twist", "Y: front − back", "X: left − right", "yaw"]
 FIGURE_TYPES = [("EPS (vector)", "*.eps"), ("PDF (vector)", "*.pdf"), ("SVG (vector)", "*.svg"),
                 ("PNG (image)", "*.png")]
+
+
+def last_session() -> Path | None:
+    """The session folder in STATE_FILE, if it is still there."""
+    try:
+        folder = Path(json.loads(STATE_FILE.read_text(encoding="utf-8"))["session"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return folder if folder.is_dir() else None
+
+
+def remember_session(folder: Path | None):
+    """Write the open session to STATE_FILE; a failure to write is not worth a message."""
+    if folder is None:
+        return
+    try:
+        STATE_FILE.write_text(json.dumps({"session": str(folder)}, indent=2) + "\n",
+                              encoding="utf-8")
+    except OSError:
+        pass
 
 
 def open_path(path: Path):
@@ -79,7 +110,7 @@ class ModesWindow(tk.Toplevel):
     def __init__(self, master, layout: lc.Layout, folder: Path | None = None, on_close=None):
         super().__init__(master)
         self.title("Strike analysis")
-        self.geometry("1320x980")
+        self.geometry(f"1320x{min(980, self.winfo_screenheight() - 80)}")
         self.default_layout = layout
         self.layout = layout
         self._on_close_cb = on_close
@@ -101,8 +132,31 @@ class ModesWindow(tk.Toplevel):
         self.vars: dict[str, tk.BooleanVar] = {}
         self._selectors: list[SpanSelector] = []
 
-        self.left = ttk.Frame(self)
-        self.left.pack(side="left", fill="y", padx=8, pady=8)
+        # Text a little smaller than the system's (never under 10 pt), titles larger and bold
+        self.body_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.body_font.configure(size=max(10, abs(self.body_font.cget("size")) - 2))
+        self.title_font = self.body_font.copy()
+        self.title_font.configure(size=self.body_font.cget("size") + 2, weight="bold")
+        self.bold_font = self.body_font.copy()
+        self.bold_font.configure(weight="bold")
+        self.mono_font = tkfont.nametofont(MONO).copy()
+        self.mono_font.configure(size=self.body_font.cget("size"))
+        style = ttk.Style(self)
+        for name in ("TLabel", "TCheckbutton", "TButton"):
+            style.configure(f"Modes.{name}", font=self.body_font)
+
+        # The controls scroll when the screen is too short for them all
+        side = ttk.Frame(self)
+        side.pack(side="left", fill="y", padx=(8, 0), pady=8)
+        self.left_canvas = tk.Canvas(side, highlightthickness=0, borderwidth=0,
+                                     background=style.lookup("TFrame", "background"))
+        self.left_scroll = ttk.Scrollbar(side, command=self.left_canvas.yview)
+        self.left_canvas.config(yscrollcommand=self.left_scroll.set)
+        self.left_canvas.pack(side="left", fill="y")
+        self.left = ttk.Frame(self.left_canvas)
+        self.left_canvas.create_window((0, 0), window=self.left, anchor="nw")
+        self.left.bind("<Configure>", lambda _e: self._fit_left())
+        self.left_canvas.bind("<Configure>", lambda _e: self._fit_left())
         self._build_session()
         self._build_signals()
         self._build_filter()
@@ -111,14 +165,14 @@ class ModesWindow(tk.Toplevel):
 
         right = ttk.Frame(self)
         right.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
-        table = ttk.LabelFrame(right, text="Resonances in the window. Corners: newtons @ degrees "
+        table = self._box(right, "Resonances in the window. Corners: newtons @ degrees "
                                            "from the largest corner (0 with it, 180 against it)")
         table.pack(side="bottom", fill="x", pady=(6, 0))
-        self.table = tk.Text(table, height=10, font=MONO, wrap="none", state="disabled",
+        self.table = tk.Text(table, height=10, font=self.mono_font, wrap="none", state="disabled",
                              relief="flat")
         self.table.pack(fill="x", padx=4, pady=2)
-        ttk.Label(table, text=dm.PHASE_NOTE, foreground="#666", wraplength=880, justify="left"
-                  ).pack(anchor="w", padx=4, pady=(0, 2))
+        self._label(table, dm.PHASE_NOTE, grey=True, wraplength=880, justify="left"
+                    ).pack(anchor="w", padx=4, pady=(0, 2))
         self.figure = Figure(figsize=(9, 7), dpi=PLOT_DPI, layout="constrained")
         # Time trace and spectrogram on top, sharing the time axis; the spectrum under them
         grid = self.figure.add_gridspec(4, 1, height_ratios=[1, 1, 1.25, 0.8])
@@ -137,39 +191,78 @@ class ModesWindow(tk.Toplevel):
         self.ax_t.set_title("Open a session and pick a capture", fontsize=10)
         self.canvas.draw()
 
+        # The session asked for, or else the one open when the window was last closed
+        folder = folder if folder is not None else last_session()
         if folder is not None:
             self.open_session(folder)
 
+    def _fit_left(self):
+        """Size the controls' canvas to them; show its scroll bar only when they don't fit."""
+        need = self.left.winfo_reqheight()
+        self.left_canvas.config(width=self.left.winfo_reqwidth(), scrollregion=(0, 0, 0, need))
+        if need > self.left_canvas.winfo_height() > 1:
+            self.left_scroll.pack(side="left", fill="y")
+        else:
+            self.left_scroll.pack_forget()
+
+    # -- small widget helpers: this window's fonts on everything -------------
+    def _box(self, parent, title: str) -> ttk.LabelFrame:
+        """A titled section."""
+        box = ttk.LabelFrame(parent, labelwidget=ttk.Label(parent, text=title, font=self.title_font))
+        box.pack(fill="x", pady=(0, 3))
+        return box
+
+    def _label(self, parent, text: str = "", grey: bool = False, **kw) -> ttk.Label:
+        if grey:
+            kw["foreground"] = "#666"
+        return ttk.Label(parent, text=text, style="Modes.TLabel", **kw)
+
+    def _button(self, parent, text: str, command, **kw) -> ttk.Button:
+        return ttk.Button(parent, text=text, command=command, style="Modes.TButton", **kw)
+
+    def _tick(self, parent, text: str, variable, command) -> ttk.Checkbutton:
+        return ttk.Checkbutton(parent, text=text, variable=variable, command=command,
+                               style="Modes.TCheckbutton")
+
+    def _row(self, parent, **pack) -> ttk.Frame:
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", padx=4, **pack)
+        return row
+
+    def _entry(self, parent, variable, width: int = 5) -> ttk.Entry:
+        """A number box that redraws on Return or when left."""
+        entry = ttk.Entry(parent, textvariable=variable, width=width, font=self.body_font)
+        entry.bind("<Return>", lambda _e: self._redraw())
+        entry.bind("<FocusOut>", lambda _e: self._redraw())
+        return entry
+
     # -- left panel -------------------------------------------------------------
     def _build_session(self):
-        box = ttk.LabelFrame(self.left, text="Session")
-        box.pack(fill="x")
-        row = ttk.Frame(box)
-        row.pack(fill="x", padx=4, pady=(2, 0))
-        ttk.Button(row, text="Open session...", command=self._ask_session).pack(side="left")
-        self.session_label = ttk.Label(row, text="none open", foreground="#666")
+        box = self._box(self.left, "Session")
+        row = self._row(box, pady=(2, 0))
+        self._button(row, "Open...", self._ask_session, width=7).pack(side="left")
+        self.session_label = self._label(row, "none open", grey=True)
         self.session_label.pack(side="left", padx=6)
+        self.only_hits = tk.BooleanVar(value=True)
+        self._tick(row, "only hits", self.only_hits, self._list_trials).pack(side="left", padx=6)
         frame = ttk.Frame(box)
-        frame.pack(fill="x", padx=4, pady=4)
-        self.trial_list = tk.Listbox(frame, height=7, width=46, exportselection=False)
+        frame.pack(fill="x", padx=4, pady=3)
+        # Usually four hits: room for five, the rest by scrolling
+        self.trial_list = tk.Listbox(frame, height=5, width=46, exportselection=False,
+                                     font=self.body_font)
         scroll = ttk.Scrollbar(frame, command=self.trial_list.yview)
         self.trial_list.config(yscrollcommand=scroll.set)
         self.trial_list.pack(side="left", fill="x", expand=True)
         scroll.pack(side="left", fill="y")
         self.trial_list.bind("<<ListboxSelect>>", lambda _e: self._on_trial_select())
-        self.only_hits = tk.BooleanVar(value=True)
-        ttk.Checkbutton(box, text="only captures with a hit in them", variable=self.only_hits,
-                        command=self._list_trials).pack(anchor="w", padx=4)
-        self.status = ttk.Label(box, text="", foreground="#666", wraplength=380, justify="left")
-        self.status.pack(fill="x", padx=4, pady=(0, 4))
-        rest = ttk.LabelFrame(self.left, text="Resting load on each corner")
-        rest.pack(fill="x", pady=(6, 0))
-        self.rest_label = ttk.Label(rest, text="", wraplength=380, justify="left")
-        self.rest_label.pack(fill="x", padx=4, pady=2)
+        self.status = self._label(box, grey=True, wraplength=400, justify="left")
+        self.status.pack(fill="x", padx=4, pady=(0, 2))
+        rest = self._box(self.left, "Resting load on each corner")
+        self.rest_label = self._label(rest, justify="left")
+        self.rest_label.pack(fill="x", padx=4, pady=1)
 
     def _build_signals(self):
-        self.signal_box = ttk.LabelFrame(self.left, text="Show")
-        self.signal_box.pack(fill="x", pady=(6, 0))
+        self.signal_box = self._box(self.left, "Show")
         self._fill_signals()
 
     def _fill_signals(self):
@@ -180,51 +273,59 @@ class ModesWindow(tk.Toplevel):
         self.signals: dict[str, dm.Signal] = {}
         self.vars = {}
         groups = dm.standard_signals(self.layout)
-        for group in ("Whole treadmill", "Rocking and twisting (Z)", "Pairs (Z)"):
-            ttk.Label(self.signal_box, text=group, font=("Helvetica", 10, "bold")
-                      ).pack(anchor="w", padx=4, pady=(3, 0))
-            row = ttk.Frame(self.signal_box)
-            row.pack(anchor="w", padx=4)
-            for s in groups[group]:
-                self._add_check(row, s, s.name, s.name in checked).pack(side="left", padx=(0, 6))
 
-        ttk.Label(self.signal_box, text="Each cell", font=("Helvetica", 10, "bold")
-                  ).pack(anchor="w", padx=4, pady=(3, 0))
-        cells = ttk.Frame(self.signal_box)
-        cells.pack(anchor="w", padx=4)
+        def row_of(title: str, group: str):
+            """A bold name, then that group's tick boxes on the same line."""
+            row = self._row(self.signal_box, pady=(2, 0))
+            self._label(row, title, font=self.bold_font).pack(side="left", padx=(0, 6))
+            for s in groups[group]:
+                self._add_check(row, s, s.name.removesuffix(" pair"), s.name in checked
+                                ).pack(side="left", padx=(0, 4))
+
+        row_of("Whole", "Whole treadmill")
+        # Each Z motion beside the sideways signal that goes with it (dashed, same colour)
+        pairs = self._row(self.signal_box, pady=(2, 0))
+        self._label(pairs, "Rock, twist (Z)", font=self.bold_font).grid(row=0, column=0, sticky="w")
+        self._label(pairs, "sideways partner (dashed)", font=self.bold_font
+                    ).grid(row=0, column=1, sticky="w", padx=(24, 0))
+        for r, (z, side) in enumerate(zip(groups["Rocking and twisting (Z)"],
+                                          groups["Sideways partners (X, Y)"]), start=1):
+            self._add_check(pairs, z, z.name, z.name in checked).grid(row=r, column=0, sticky="w")
+            self._add_check(pairs, side, side.name, side.name in checked
+                            ).grid(row=r, column=1, sticky="w", padx=(24, 0))
+        row_of("Z pairs", "Pairs (Z)")
+
+        cells = self._row(self.signal_box, pady=(2, 0))
+        self._label(cells, "Each cell", font=self.bold_font).grid(row=0, column=0, sticky="w")
         for c, comp in enumerate(("X", "Y", "Z", "|F|")):
             tk.Label(cells, text=comp, fg=dm.AXIS_COLORS[comp],
-                     font=("Helvetica", 10, "bold")).grid(row=0, column=c + 1)
+                     font=self.bold_font).grid(row=0, column=c + 1)
         by_name = {s.name: s for s in groups["Each cell"]}
         for r, cell in enumerate(lc.CELLS, start=1):
-            ttk.Label(cells, text=f"{cell}  {self.layout.where[cell]}"
-                      ).grid(row=r, column=0, sticky="w", padx=(0, 6))
+            self._label(cells, f"{cell}  {self.layout.where[cell]}"
+                        ).grid(row=r, column=0, sticky="w", padx=(0, 6))
             for c, comp in enumerate(("X", "Y", "Z", "|F|")):
                 s = by_name[f"{cell}{comp}"]
                 self._add_check(cells, s, "", s.name in checked).grid(row=r, column=c + 1)
 
-        ttk.Label(self.signal_box, text="Your own pair", font=("Helvetica", 10, "bold")
-                  ).pack(anchor="w", padx=4, pady=(3, 0))
-        row = ttk.Frame(self.signal_box)
-        row.pack(anchor="w", padx=4)
+        # Your own pair: cell, axis, plus or minus, cell
+        row = self._row(self.signal_box, pady=(2, 0))
+        self._label(row, "Own pair", font=self.bold_font).pack(side="left", padx=(0, 6))
         self.pair_a, self.pair_b = tk.StringVar(value="1"), tk.StringVar(value="2")
         self.pair_sign, self.pair_axis = tk.StringVar(value="−"), tk.StringVar(value="Z")
-        for var, values, width in ((self.pair_a, lc.CELLS, 2), (self.pair_axis, ["X", "Y", "Z"], 2),
-                                   (self.pair_sign, ["+", "−"], 2), (self.pair_b, lc.CELLS, 2)):
-            ttk.Combobox(row, textvariable=var, values=values, width=width, state="readonly"
-                         ).pack(side="left", padx=1)
-        ttk.Label(row, text="(cell, axis, ±, cell)", foreground="#666").pack(side="left", padx=4)
-        ttk.Button(row, text="Add", width=5, command=self._add_pair).pack(side="left")
-        self.custom_row = ttk.Frame(self.signal_box)
-        self.custom_row.pack(anchor="w", padx=4, pady=(0, 4))
+        for var, values in ((self.pair_a, lc.CELLS), (self.pair_axis, ["X", "Y", "Z"]),
+                            (self.pair_sign, ["+", "−"]), (self.pair_b, lc.CELLS)):
+            ttk.Combobox(row, textvariable=var, values=values, width=2, state="readonly",
+                         font=self.body_font).pack(side="left", padx=1)
+        self._button(row, "Add", self._add_pair, width=4).pack(side="left", padx=4)
+        self.custom_row = self._row(self.signal_box, pady=(0, 2))
         for s in self.custom:
             self._add_check(self.custom_row, s, s.name, s.name in checked).pack(side="left")
 
     def _add_check(self, parent, signal: dm.Signal, text: str, on: bool) -> ttk.Checkbutton:
         self.signals[signal.name] = signal
         self.vars[signal.name] = tk.BooleanVar(value=on)
-        return ttk.Checkbutton(parent, text=text, variable=self.vars[signal.name],
-                               command=self._redraw)
+        return self._tick(parent, text, self.vars[signal.name], self._redraw)
 
     def _add_pair(self):
         a, b = int(self.pair_a.get()), int(self.pair_b.get())
@@ -241,57 +342,52 @@ class ModesWindow(tk.Toplevel):
         self._redraw()
 
     def _build_filter(self):
-        box = ttk.LabelFrame(self.left, text="Filter (before everything else; no time shift)")
-        box.pack(fill="x", pady=(6, 0))
-        row = ttk.Frame(box)
-        row.pack(anchor="w", padx=4, pady=4)
+        box = self._box(self.left, "Filter (no time shift)")
+        row = self._row(box, pady=2)
         self.filter_kind = tk.StringVar(value="none")
         kind = ttk.Combobox(row, textvariable=self.filter_kind, values=dm.FILTERS, width=9,
-                            state="readonly")
+                            state="readonly", font=self.body_font)
         kind.pack(side="left")
         kind.bind("<<ComboboxSelected>>", lambda _e: self._redraw())
         self.filter_lo, self.filter_hi = tk.StringVar(value="25"), tk.StringVar(value="35")
         for label, var in (("from", self.filter_lo), ("to", self.filter_hi)):
-            ttk.Label(row, text=label).pack(side="left", padx=(6, 2))
-            entry = ttk.Entry(row, textvariable=var, width=5)
-            entry.pack(side="left")
-            entry.bind("<Return>", lambda _e: self._redraw())
-            entry.bind("<FocusOut>", lambda _e: self._redraw())
-        ttk.Label(row, text="Hz").pack(side="left", padx=2)
-        ttk.Label(box, text="low-pass keeps below 'to'; high-pass keeps above 'from';\n"
-                            "band-pass keeps between them; notch removes between them.\n"
-                            "A narrow band rings before the hit as well as after it.",
-                  foreground="#666", justify="left").pack(anchor="w", padx=4, pady=(0, 4))
+            self._label(row, label).pack(side="left", padx=(6, 2))
+            self._entry(row, var).pack(side="left")
+        self._label(row, "Hz").pack(side="left", padx=2)
 
     def _build_window(self):
-        box = ttk.LabelFrame(self.left, text="Time window for the spectrum")
-        box.pack(fill="x", pady=(6, 0))
-        self.window_label = ttk.Label(box, text="")
-        self.window_label.pack(anchor="w", padx=4, pady=(2, 0))
-        row = ttk.Frame(box)
-        row.pack(anchor="w", padx=4, pady=2)
-        ttk.Button(row, text="ring-down after the hit", command=self._window_ring).pack(side="left")
-        ttk.Button(row, text="whole capture", command=self._window_all).pack(side="left", padx=4)
-        ttk.Label(box, text="or drag across either of the top two plots", foreground="#666"
-                  ).pack(anchor="w", padx=4)
-        row = ttk.Frame(box)
-        row.pack(anchor="w", padx=4, pady=(2, 4))
+        box = self._box(self.left, "Time window")
+        row = self._row(box, pady=(2, 0))
+        self.window_label = self._label(row)
+        self.window_label.pack(side="left")
+        self._label(row, "   drag on a top plot to change", grey=True).pack(side="left")
+        row = self._row(box, pady=2)
+        self._button(row, "ring-down after the hit", self._window_ring).pack(side="left")
+        self._button(row, "whole capture", self._window_all).pack(side="left", padx=4)
+        row = self._row(box, pady=(0, 2))
         self.log_scale = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row, text="log scale", variable=self.log_scale, command=self._redraw
-                        ).pack(side="left")
-        ttk.Label(row, text="   show up to").pack(side="left")
+        self._tick(row, "log scale", self.log_scale, self._redraw).pack(side="left")
+        self._label(row, "   spectrum up to").pack(side="left")
         self.f_max = tk.StringVar(value="100")
-        entry = ttk.Entry(row, textvariable=self.f_max, width=5)
-        entry.pack(side="left", padx=2)
-        entry.bind("<Return>", lambda _e: self._redraw())
-        entry.bind("<FocusOut>", lambda _e: self._redraw())
-        ttk.Label(row, text="Hz").pack(side="left")
+        self._entry(row, self.f_max).pack(side="left", padx=2)
+        self._label(row, "Hz").pack(side="left")
 
     def _build_output(self):
-        row = ttk.Frame(self.left)
-        row.pack(fill="x", pady=(8, 0))
-        ttk.Button(row, text="Save figure...", command=self._save_figure).pack(side="left")
-        ttk.Button(row, text="Strike report (PDF)...", command=self._report).pack(side="left", padx=6)
+        row = self._row(self.left, pady=(2, 5))
+        self._button(row, "Save figure...", self._save_figure).pack(side="left")
+        self._button(row, "Strike report (PDF)...", self._report).pack(side="left", padx=6)
+        box = self._box(self.left, "What is plotted")
+        self.formula_label = self._label(box, font=self.mono_font, justify="left")
+        self.formula_label.pack(anchor="w", padx=4, pady=2)
+        self._show_formulas()
+
+    def _show_formulas(self):
+        """The sums behind the motions; the yaw's numbers depend on where the cells sit."""
+        sideways = [line if len(line) < 48 else line.replace(") + ", ")\n    + ")
+                    for line in dm.horizontal_formulas(self.layout)]      # keep the panel narrow
+        self.formula_label.config(text="\n".join(
+            [*dm.pattern_formulas()[:4], *sideways,
+             "z, x, y: that force at the corner (F front, B back)"]))
 
     def _say(self, text: str):
         self.status.config(text=text)
@@ -313,12 +409,12 @@ class ModesWindow(tk.Toplevel):
         self.folder, self.every_trial = folder, every
         self.layout, self.note = lc.calibration_for_session(folder, self.default_layout)
         self._fill_signals()
+        self._show_formulas()
         self.session_label.config(text=folder.name)
         self._say("Reading the captures...")
         self.update_idletasks()
         self.hit_trials = dm.captures_with_a_hit(folder, self.layout)
-        rest = dm.resting_load_lines(dm.static_corner_loads(folder, self.layout))
-        self.rest_label.config(text="\n".join(rest) if rest else "not known for this session")
+        self.rest_label.config(text=dm.resting_load_short(dm.static_corner_loads(folder, self.layout)))
         self._list_trials()
 
     def _list_trials(self):
@@ -469,7 +565,7 @@ class ModesWindow(tk.Toplevel):
         self._selectors = [SpanSelector(ax, self._on_span, "horizontal", useblit=False,
                                         props=dict(facecolor="#1f6fd1", alpha=0.2))
                            for ax in (self.ax_t, self.ax_s)]
-        self.window_label.config(text=f"{t[a]:.2f} to {t[b - 1]:.2f} s  ({(b - a) / self.rate:.2f} s)")
+        self.window_label.config(text=f"{t[a]:.2f} to {t[b - 1]:.2f} s ({(b - a) / self.rate:.2f} s)")
         dm.draw_mode_shapes(self.shape_axes, self.modes)
         self._show_table()
         self.canvas.draw_idle()
@@ -535,6 +631,7 @@ class ModesWindow(tk.Toplevel):
         return path
 
     def close(self):
+        remember_session(self.folder)
         self.destroy()
         if self._on_close_cb:
             self._on_close_cb()
