@@ -548,33 +548,56 @@ def resting_load_lines(static: dict[str, float] | None) -> list[str]:
 
 
 def resting_load_short(static: dict[str, float] | None) -> str:
-    """The same on one short line, for the window."""
+    """The Z loads in two short lines, front row over back row, for the window."""
     if not static:
         return "not known for this session"
-    total = sum(static.values())
-    front = static[CORNERS[0]] + static[CORNERS[1]]
-    diagonal = static[CORNERS[0]] + static[CORNERS[2]]
-    return ("  ".join(f"{short} {static[name]:.0f}" for short, name in zip(CORNER_SHORT, CORNERS))
-            + f" N    {total / fp.GRAVITY:.0f} kg    front {front / total * 100:.0f}%"
-            f"    FL+BR {diagonal / total * 100:.0f}%")
+    fl, fr, br, bl = (static[name] for name in CORNERS)
+    total = fl + fr + br + bl
+    return (f"FL {fl:5.0f}   FR {fr:5.0f} N    total {total / fp.GRAVITY:.0f} kg\n"
+            f"BL {bl:5.0f}   BR {br:5.0f} N    front {(fl + fr) / total * 100:.0f}%, "
+            f"FL+BR {(fl + br) / total * 100:.0f}%")
 
 
 def default_report_name(folder: Path) -> str:
     return f"{Path(folder).name}_strike_report.pdf"
 
 
-def static_corner_loads(folder: Path, layout: lc.Layout) -> dict[str, float] | None:
+def static_channel_loads(folder: Path, layout: lc.Layout) -> np.ndarray | None:
     """
-    Newtons resting on each corner: the session's resting volts minus each
-    cell's unloaded output from its calibration sheet. Only as good as those
-    sheet offsets still are once the cells are bolted in.
+    (4, 3) newtons resting on each of CORNERS in X, Y and Z: the session's
+    resting volts minus each cell's unloaded output from its calibration sheet.
+    Only as good as those sheet offsets still are once the cells are bolted in.
+    X and Y are in each cell's own axes.
     """
     rest = lc.rest_volts_for_session(folder)
     if rest is None or not all(lc.serial_key(layout.serials.get(c, "")) in lc.SHEETS for c in lc.CELLS):
         return None
     unloaded = np.concatenate([lc.expected_unbalance_v(layout.serials[c]) for c in lc.CELLS])
-    forces = lc.cell_forces(rest, unloaded, layout)
-    return {name: float(forces[3 * c + 2]) for name, c in zip(CORNERS, corner_inputs(layout))}
+    forces = lc.cell_forces(rest, unloaded, layout).reshape(4, 3)
+    return forces[corner_inputs(layout)]
+
+
+def static_corner_loads(folder: Path, layout: lc.Layout) -> dict[str, float] | None:
+    """The Z column of static_channel_loads: newtons resting on each corner."""
+    loads = static_channel_loads(folder, layout)
+    return None if loads is None else dict(zip(CORNERS, loads[:, 2].tolist()))
+
+
+def resting_channel_lines(loads: np.ndarray | None) -> list[str]:
+    """
+    The resting load in every channel, laid out as the deck is seen from
+    above: front row over back row, left beside right.
+    """
+    if loads is None:
+        return []
+    fl, fr, br, bl = loads                      # CORNERS order
+    cell = lambda v: "".join(f"{x:7.0f}" for x in v)        # noqa: E731
+    head = f"{'X':>7}{'Y':>7}{'Z':>7}"
+    return [f"  {'':6}{'left':^21}    {'right':^21}",
+            f"  {'':6}{head}    {head}",
+            f"  {'front':6}{cell(fl)}    {cell(fr)}",
+            f"  {'back':6}{cell(bl)}    {cell(br)}",
+            f"  {'total':6}{cell(loads.sum(0))}"]
 
 
 def analyse_session(folder: Path, trial_ids: list[int] | None = None,
@@ -601,7 +624,8 @@ def analyse_session(folder: Path, trial_ids: list[int] | None = None,
                      "modes": modes_in(forces[a:b], rate, layout),
                      "bands": band_fractions(forces[a:b], rate, fz)})
     return {"folder": folder, "layout": layout, "note": note, "hits": hits, "skipped": skipped,
-            "static": static_corner_loads(folder, layout)}
+            "static": static_corner_loads(folder, layout),
+            "static_xyz": static_channel_loads(folder, layout)}
 
 
 def modes_across(hits: list[dict], tolerance_hz: float = 1.2) -> list[dict]:
@@ -638,8 +662,12 @@ def summary_lines(result: dict) -> list[str]:
     if result["note"]:
         lines += [f"Note: {result['note']}", ""]
     if result["static"]:
-        lines += ["Resting load on each corner (resting volts minus the sheets' unloaded output):",
-                  *("  " + line for line in resting_load_lines(result["static"])), ""]
+        lines += ["Resting load in each channel, newtons (resting volts minus the sheets' unloaded "
+                  "output):",
+                  *resting_channel_lines(result["static_xyz"]),
+                  "  Z: " + resting_load_lines(result["static"])[1],
+                  "  X and Y are in each cell's own axes; their directions against the deck are "
+                  "not yet checked.", ""]
     lines += [f"Hits analysed: {len(hits)}"]
     for h in hits:
         e = h["entry"]

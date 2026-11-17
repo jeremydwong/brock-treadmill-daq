@@ -146,6 +146,13 @@ def test_session_report(tmp_path):
     assert dm.default_report_name(folder) == "20260101-000000_strike_report.pdf"
     assert [round(g["hz"]) for g in dm.modes_across(result["hits"])] == [19, 29]
     assert any("bounce" in line for line in dm.summary_lines(result))
+    assert result["static_xyz"].shape == (4, 3)
+    assert result["static_xyz"][:, 2].tolist() == list(result["static"].values())
+    table = dm.resting_channel_lines(np.arange(12.0).reshape(4, 3))      # FL, FR, BR, BL rows
+    assert table[2].split() == ["front", "0", "1", "2", "3", "4", "5"]   # front left, front right
+    assert table[3].split() == ["back", "9", "10", "11", "6", "7", "8"]  # back left, back right
+    assert table[4].split() == ["total", "18", "22", "26"]
+    assert dm.resting_load_short(dict(zip(dm.CORNERS, [1, 2, 3, 4]))).splitlines()[1].startswith("BL     4   BR     3")
     out = dm.write_report(result, tmp_path / "out" / "report.pdf")
     assert out.read_bytes().startswith(b"%PDF") and out.stat().st_size > 20_000
 

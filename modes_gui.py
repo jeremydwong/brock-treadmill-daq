@@ -258,7 +258,7 @@ class ModesWindow(tk.Toplevel):
         self.status = self._label(box, grey=True, wraplength=400, justify="left")
         self.status.pack(fill="x", padx=4, pady=(0, 2))
         rest = self._box(self.left, "Resting load on each corner")
-        self.rest_label = self._label(rest, justify="left")
+        self.rest_label = self._label(rest, justify="left", font=self.mono_font)   # columns line up
         self.rest_label.pack(fill="x", padx=4, pady=1)
 
     def _build_signals(self):
