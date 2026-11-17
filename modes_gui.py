@@ -29,8 +29,8 @@ and notch removes between them.
 The table under the plots lists the resonances in the window: how much of each
 is bounce, pitch, roll and twist, its damping, and each corner's Z as newtons
 @ phase. The row of small decks (seen from above) draws them as a disc per
-corner: its size is the amplitude, green + moves with the largest corner, red
-− against it.
+corner: its area follows the amplitude (scaled to the largest corner of that
+resonance), green + moves with the largest corner, red − against it.
 
 Only captures with a strike in them are listed (untick "only hits" to see the
 rest), and the resting load on each corner is shown under the list. The

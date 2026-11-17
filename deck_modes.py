@@ -457,16 +457,21 @@ def mode_table(modes: list[dict]) -> list[str]:
 
 
 PHASE_COLORS = {"with": "#33aa55", "against": "#c0392b", "between": "#888888"}
-PHASE_NOTE = ("Small decks: seen from above, front at the top. A disc at each corner: its size is "
-              "that corner's Z amplitude; green + moves with the largest corner, red − moves "
-              "against it, grey (with its degrees) is in between: two modes overlapping.")
+PHASE_NOTE = ("Small decks: seen from above, front at the top. A disc at each corner: its area "
+              "(not its radius) follows that corner's Z amplitude, scaled to the largest corner "
+              "of that resonance, with a small minimum so every corner shows. Green + moves with "
+              "the largest corner, red − against it, grey (with its degrees) is in between: two "
+              "modes overlapping.")
 
 
 def draw_mode_shapes(axes, modes: list[dict]):
     """
     One small deck per mode, seen from above with the front at the top. At each
-    corner a disc whose area is that corner's Z amplitude (the largest corner
-    fills the scale). Green with a + moves in step with the largest corner, red
+    corner a disc whose area is in proportion to that corner's Z amplitude, on
+    top of a small minimum so a quiet corner still shows; the largest corner of
+    each mode gets the full size, so sizes compare corners within a deck, not
+    one deck with another. (Power goes as amplitude squared, so the areas
+    understate differences in power.) Green with a + moves in step with the largest corner, red
     with a − moves against it; grey, labelled with its phase in degrees, is
     neither (within 60 degrees of a quarter cycle).
     """
@@ -701,8 +706,10 @@ def summary_lines(result: dict) -> list[str]:
               "opposed cancel. Each hit's page shows them: the table gives every corner as",
               "newtons @ degrees from the largest corner (0 = with it, 180 = against it, near",
               "90 = two modes overlapping), and the small decks (seen from above, front at the",
-              "top) draw the same as a disc per corner: size = amplitude, green + = moves with",
-              "the largest corner, red − = against it, grey = in between.",
+              "top) draw the same as a disc per corner: green + = moves with the largest corner,",
+              "red − = against it, grey = in between. A disc's area (not its radius) follows the",
+              "corner's amplitude, scaled to the largest corner of that resonance, with a small",
+              "minimum size; so compare discs within one deck, not between decks.",
               "Fz total is what a gait analysis reads; pitch and roll move the centre of pressure."]
     return lines
 
